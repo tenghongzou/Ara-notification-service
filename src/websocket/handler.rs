@@ -13,6 +13,7 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 
 use crate::auth::Claims;
+use crate::cluster::SessionInfo;
 use crate::connection_manager::ConnectionHandle;
 use crate::metrics::{WsMessageMetrics, WS_CONNECTIONS_CLOSED, WS_CONNECTIONS_OPENED, WS_CONNECTION_DURATION};
 use crate::server::AppState;
@@ -124,6 +125,25 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: Claims) {
     // Record connection opened metric
     WS_CONNECTIONS_OPENED.inc();
 
+    // Register session in cluster store (for distributed deployments)
+    if state.session_store.is_enabled() {
+        let session_info = SessionInfo {
+            connection_id,
+            user_id: user_id.clone(),
+            tenant_id: tenant_id.clone(),
+            server_id: state.session_store.server_id().to_string(),
+            connected_at: chrono::Utc::now().timestamp(),
+            channels: vec![],
+        };
+        if let Err(e) = state.session_store.register_session(&session_info).await {
+            tracing::warn!(
+                connection_id = %connection_id,
+                error = %e,
+                "Failed to register session in cluster store"
+            );
+        }
+    }
+
     tracing::info!(
         connection_id = %connection_id,
         user_id = %user_id,
@@ -199,6 +219,17 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: Claims) {
 
     // Unregister connection
     state.connection_manager.unregister(connection_id).await;
+
+    // Unregister session from cluster store
+    if state.session_store.is_enabled() {
+        if let Err(e) = state.session_store.unregister_session(connection_id).await {
+            tracing::warn!(
+                connection_id = %connection_id,
+                error = %e,
+                "Failed to unregister session from cluster store"
+            );
+        }
+    }
 
     // Record connection closed and duration metrics
     WS_CONNECTIONS_CLOSED.inc();
@@ -389,7 +420,19 @@ async fn handle_subscribe(
             channels = ?subscribed,
             "Subscribed to channels"
         );
-        let _ = handle.send(ServerMessage::subscribed(subscribed)).await;
+        let _ = handle.send(ServerMessage::subscribed(subscribed.clone())).await;
+
+        // Update session channels in cluster store
+        if state.session_store.is_enabled() {
+            let current_channels: Vec<String> = handle.subscriptions.read().await.iter().cloned().collect();
+            if let Err(e) = state.session_store.update_session_channels(handle.id, current_channels).await {
+                tracing::warn!(
+                    connection_id = %handle.id,
+                    error = %e,
+                    "Failed to update session channels in cluster store"
+                );
+            }
+        }
     }
 
     // Send error for subscription limit exceeded
@@ -431,6 +474,18 @@ async fn handle_unsubscribe(
             "Unsubscribed from channels"
         );
         let _ = handle.send(ServerMessage::unsubscribed(unsubscribed)).await;
+
+        // Update session channels in cluster store
+        if state.session_store.is_enabled() {
+            let current_channels: Vec<String> = handle.subscriptions.read().await.iter().cloned().collect();
+            if let Err(e) = state.session_store.update_session_channels(handle.id, current_channels).await {
+                tracing::warn!(
+                    connection_id = %handle.id,
+                    error = %e,
+                    "Failed to update session channels in cluster store"
+                );
+            }
+        }
     }
 }
 

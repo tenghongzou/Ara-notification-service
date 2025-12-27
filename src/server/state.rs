@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::auth::JwtValidator;
+use crate::cluster::{create_session_store, ClusterRouter, SessionStore};
 use crate::config::Settings;
 use crate::connection_manager::{ConnectionLimits, ConnectionManager};
 use crate::notification::{
@@ -33,6 +34,10 @@ pub struct AppState {
     pub queue_backend: Arc<dyn MessageQueueBackend>,
     /// Backend for persistent ACK tracking (memory, Redis, or PostgreSQL)
     pub ack_backend: Arc<dyn AckTrackerBackend>,
+    /// Session store for distributed cluster mode
+    pub session_store: Arc<dyn SessionStore>,
+    /// Cluster router for cross-server message delivery
+    pub cluster_router: Arc<ClusterRouter>,
 }
 
 impl AppState {
@@ -56,8 +61,10 @@ impl AppState {
         let redis_circuit_breaker = Arc::new(CircuitBreaker::with_config(cb_config));
         let redis_health = Arc::new(RedisHealth::new());
 
-        // Create Redis pool if Redis backend is needed for queue or ACK tracking
-        let needs_redis = settings.queue.backend == "redis" || settings.ack.backend == "redis";
+        // Create Redis pool if Redis backend is needed for queue, ACK tracking, or cluster mode
+        let needs_redis = settings.queue.backend == "redis"
+            || settings.ack.backend == "redis"
+            || settings.cluster.enabled;
         let redis_pool = if needs_redis {
             match RedisPool::new(
                 settings.redis.clone(),
@@ -106,6 +113,15 @@ impl AppState {
         // Create persistent ACK backend (memory, Redis, or PostgreSQL)
         let ack_backend = create_ack_backend(&settings.ack, redis_pool.clone(), postgres_pool.clone(), None);
 
+        // Create session store for cluster mode
+        let session_store = create_session_store(&settings.cluster, redis_pool.clone());
+
+        // Create cluster router for cross-server message delivery
+        let cluster_router = Arc::new(ClusterRouter::new(
+            connection_manager.clone(),
+            session_store.clone(),
+        ));
+
         // Create legacy message queue for backward compatibility
         // (still used by existing code, will be migrated to queue_backend)
         let queue_config = QueueConfig {
@@ -141,6 +157,8 @@ impl AppState {
             ws_messages_per_second: settings.ratelimit.ws_messages_per_second,
             cleanup_interval_seconds: settings.ratelimit.cleanup_interval_seconds,
             bucket_ttl_seconds: 300, // 5 minutes default
+            backend: settings.ratelimit.backend.clone(),
+            redis_prefix: settings.ratelimit.redis_prefix.clone(),
         }));
 
         // Create template store
@@ -165,6 +183,8 @@ impl AppState {
             tenant_manager,
             queue_backend,
             ack_backend,
+            session_store,
+            cluster_router,
         }
     }
 }

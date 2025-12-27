@@ -370,6 +370,11 @@ impl ConnectionManager {
         }
     }
 
+    /// Get total number of channel subscriptions across all connections
+    pub fn total_subscriptions(&self) -> usize {
+        self.channel_index.iter().map(|e| e.value().len()).sum()
+    }
+
     /// Find connections that have been inactive for longer than the timeout
     /// This is now lock-free thanks to AtomicI64 for last_activity
     pub fn find_stale_connections(&self, timeout_secs: u64) -> Vec<Uuid> {

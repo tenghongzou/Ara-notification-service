@@ -65,10 +65,15 @@ pub fn create_app(state: AppState) -> Router {
         .route("/tenants", get(crate::api::list_tenants))
         .route("/tenants/{tenant_id}", get(crate::api::get_tenant_stats));
 
+    // Cluster management routes
+    let cluster_routes = Router::new()
+        .route("/cluster/status", get(crate::api::cluster_status))
+        .route("/cluster/users/{user_id}", get(crate::api::cluster_user_location));
+
     // Protected API routes (require API key) with rate limiting
     let protected_routes = Router::new()
         .route("/stats", get(crate::api::stats))
-        .nest("/api/v1", notification_routes.merge(batch_routes).merge(channel_routes).merge(template_routes).merge(tenant_routes))
+        .nest("/api/v1", notification_routes.merge(batch_routes).merge(channel_routes).merge(template_routes).merge(tenant_routes).merge(cluster_routes))
         .layer(middleware::from_fn_with_state(state.clone(), api_key_auth))
         .layer(middleware::from_fn_with_state(state.clone(), rate_limit_middleware));
 

@@ -271,6 +271,100 @@ lazy_static! {
         "Number of notifications per batch request",
         vec![1.0, 5.0, 10.0, 25.0, 50.0, 75.0, 100.0]
     ).unwrap();
+
+    // ============================================================================
+    // Process & Memory Metrics
+    // ============================================================================
+
+    /// Process memory usage (resident set size) in bytes
+    pub static ref PROCESS_MEMORY_BYTES: IntGauge = register_int_gauge!(
+        format!("{}_process_memory_bytes", METRIC_PREFIX),
+        "Process memory usage (RSS) in bytes"
+    ).unwrap();
+
+    /// Estimated connection manager memory in bytes
+    pub static ref CONNECTION_MANAGER_MEMORY_BYTES: IntGauge = register_int_gauge!(
+        format!("{}_connection_manager_memory_bytes", METRIC_PREFIX),
+        "Estimated memory used by connection manager"
+    ).unwrap();
+
+    /// Estimated queue memory in bytes
+    pub static ref QUEUE_MEMORY_BYTES: IntGauge = register_int_gauge!(
+        format!("{}_queue_memory_bytes", METRIC_PREFIX),
+        "Estimated memory used by message queue"
+    ).unwrap();
+
+    /// Heartbeat round duration in milliseconds
+    pub static ref HEARTBEAT_DURATION_MS: Histogram = register_histogram!(
+        format!("{}_heartbeat_duration_ms", METRIC_PREFIX),
+        "Heartbeat round duration in milliseconds",
+        vec![10.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0, 10000.0]
+    ).unwrap();
+
+    /// Heartbeat timeouts per round
+    pub static ref HEARTBEAT_TIMEOUTS: IntCounter = register_int_counter!(
+        format!("{}_heartbeat_timeouts_total", METRIC_PREFIX),
+        "Total heartbeat send timeouts"
+    ).unwrap();
+
+    // ============================================================================
+    // Backend Metrics
+    // ============================================================================
+
+    /// Backend operation latency
+    pub static ref BACKEND_OPERATION_LATENCY: HistogramVec = register_histogram_vec!(
+        format!("{}_backend_operation_latency_seconds", METRIC_PREFIX),
+        "Backend operation latency in seconds",
+        &["backend", "operation"],
+        vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]
+    ).unwrap();
+
+    /// Backend operation errors
+    pub static ref BACKEND_ERRORS_TOTAL: IntCounterVec = register_int_counter_vec!(
+        format!("{}_backend_errors_total", METRIC_PREFIX),
+        "Total backend operation errors",
+        &["backend", "operation"]
+    ).unwrap();
+
+    // ============================================================================
+    // Cluster Metrics
+    // ============================================================================
+
+    /// Cluster mode enabled (1=enabled, 0=disabled)
+    pub static ref CLUSTER_ENABLED: IntGauge = register_int_gauge!(
+        format!("{}_cluster_enabled", METRIC_PREFIX),
+        "Cluster mode enabled (1=enabled, 0=disabled)"
+    ).unwrap();
+
+    /// Cluster-wide total connections (across all servers)
+    pub static ref CLUSTER_CONNECTIONS_TOTAL: IntGauge = register_int_gauge!(
+        format!("{}_cluster_connections_total", METRIC_PREFIX),
+        "Cluster-wide total connections"
+    ).unwrap();
+
+    /// Cluster-wide unique users (across all servers)
+    pub static ref CLUSTER_USERS_TOTAL: IntGauge = register_int_gauge!(
+        format!("{}_cluster_users_total", METRIC_PREFIX),
+        "Cluster-wide unique users"
+    ).unwrap();
+
+    /// Sessions refreshed during heartbeat
+    pub static ref CLUSTER_SESSIONS_REFRESHED: IntCounter = register_int_counter!(
+        format!("{}_cluster_sessions_refreshed_total", METRIC_PREFIX),
+        "Total cluster sessions refreshed"
+    ).unwrap();
+
+    /// Routed messages published (to other servers)
+    pub static ref CLUSTER_MESSAGES_ROUTED: IntCounter = register_int_counter!(
+        format!("{}_cluster_messages_routed_total", METRIC_PREFIX),
+        "Total messages routed to other servers"
+    ).unwrap();
+
+    /// Routed messages received (from other servers)
+    pub static ref CLUSTER_MESSAGES_RECEIVED: IntCounter = register_int_counter!(
+        format!("{}_cluster_messages_received_total", METRIC_PREFIX),
+        "Total messages received from other servers"
+    ).unwrap();
 }
 
 /// Encode all metrics to Prometheus text format
@@ -344,6 +438,128 @@ impl RateLimitMetrics {
     /// Record a denied WebSocket connection
     pub fn record_ws_denied() {
         RATELIMIT_DENIED_TOTAL.with_label_values(&["ws"]).inc();
+    }
+}
+
+/// Helper struct for memory metrics
+pub struct MemoryMetrics;
+
+impl MemoryMetrics {
+    /// Update process memory metric (call periodically)
+    pub fn update_process_memory() {
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+                for line in status.lines() {
+                    if line.starts_with("VmRSS:") {
+                        if let Some(kb_str) = line.split_whitespace().nth(1) {
+                            if let Ok(kb) = kb_str.parse::<i64>() {
+                                PROCESS_MEMORY_BYTES.set(kb * 1024);
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            // On Windows, we can use GetProcessMemoryInfo but that requires winapi
+            // For now, just set to 0 to indicate not available
+            // In production, consider using the `sysinfo` crate
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            // On macOS, we could use mach APIs
+            // For now, just set to 0 to indicate not available
+        }
+    }
+
+    /// Update connection manager memory estimate
+    pub fn update_connection_manager_memory(connections: usize, subscriptions: usize) {
+        // Rough estimate: each connection handle ~500 bytes, each subscription ~100 bytes
+        const CONNECTION_SIZE: usize = 500;
+        const SUBSCRIPTION_SIZE: usize = 100;
+        let estimated = (connections * CONNECTION_SIZE + subscriptions * SUBSCRIPTION_SIZE) as i64;
+        CONNECTION_MANAGER_MEMORY_BYTES.set(estimated);
+    }
+
+    /// Update queue memory estimate
+    pub fn update_queue_memory(messages: usize, avg_message_size: usize) {
+        // Estimate based on message count and average size
+        let estimated = (messages * avg_message_size) as i64;
+        QUEUE_MEMORY_BYTES.set(estimated);
+    }
+}
+
+/// Helper struct for heartbeat metrics
+pub struct HeartbeatMetrics;
+
+impl HeartbeatMetrics {
+    /// Record heartbeat round duration
+    pub fn record_duration_ms(duration_ms: u64) {
+        HEARTBEAT_DURATION_MS.observe(duration_ms as f64);
+    }
+
+    /// Record heartbeat timeouts
+    pub fn record_timeouts(count: u64) {
+        HEARTBEAT_TIMEOUTS.inc_by(count);
+    }
+}
+
+/// Helper struct for backend metrics
+pub struct BackendMetrics;
+
+impl BackendMetrics {
+    /// Record backend operation latency
+    pub fn record_latency(backend: &str, operation: &str, latency_secs: f64) {
+        BACKEND_OPERATION_LATENCY
+            .with_label_values(&[backend, operation])
+            .observe(latency_secs);
+    }
+
+    /// Record backend error
+    pub fn record_error(backend: &str, operation: &str) {
+        BACKEND_ERRORS_TOTAL
+            .with_label_values(&[backend, operation])
+            .inc();
+    }
+}
+
+/// Helper struct for cluster metrics
+pub struct ClusterMetrics;
+
+impl ClusterMetrics {
+    /// Set cluster enabled status
+    pub fn set_enabled(enabled: bool) {
+        CLUSTER_ENABLED.set(if enabled { 1 } else { 0 });
+    }
+
+    /// Update cluster-wide connection count
+    pub fn set_cluster_connections(count: usize) {
+        CLUSTER_CONNECTIONS_TOTAL.set(count as i64);
+    }
+
+    /// Update cluster-wide user count
+    pub fn set_cluster_users(count: usize) {
+        CLUSTER_USERS_TOTAL.set(count as i64);
+    }
+
+    /// Record sessions refreshed
+    pub fn record_sessions_refreshed(count: usize) {
+        CLUSTER_SESSIONS_REFRESHED.inc_by(count as u64);
+    }
+
+    /// Record message routed to another server
+    pub fn record_message_routed() {
+        CLUSTER_MESSAGES_ROUTED.inc();
+    }
+
+    /// Record message received from another server
+    pub fn record_message_received() {
+        CLUSTER_MESSAGES_RECEIVED.inc();
     }
 }
 
@@ -452,6 +668,17 @@ mod tests {
         ACK_EXPIRED_TOTAL.inc();
         ACK_PENDING.set(5);
         ACK_LATENCY.observe(0.1);
+        // Just verify no panics
+    }
+
+    #[test]
+    fn test_cluster_metrics() {
+        ClusterMetrics::set_enabled(true);
+        ClusterMetrics::set_cluster_connections(100);
+        ClusterMetrics::set_cluster_users(50);
+        ClusterMetrics::record_sessions_refreshed(10);
+        ClusterMetrics::record_message_routed();
+        ClusterMetrics::record_message_received();
         // Just verify no panics
     }
 }

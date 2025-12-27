@@ -1,16 +1,28 @@
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
+use futures::future::join_all;
 use tokio::sync::broadcast;
+use tokio::time::timeout;
 
+use crate::cluster::SessionStore;
 use crate::config::WebSocketConfig;
 use crate::connection_manager::ConnectionManager;
+use crate::metrics::{HeartbeatMetrics, MemoryMetrics};
 use crate::websocket::ServerMessage;
+
+/// Timeout for individual heartbeat send operations
+const HEARTBEAT_SEND_TIMEOUT_MS: u64 = 5000;
+
+/// Maximum concurrent heartbeat sends to avoid overwhelming the system
+const MAX_CONCURRENT_HEARTBEATS: usize = 1000;
 
 /// Background task for heartbeat and connection cleanup
 pub struct HeartbeatTask {
     config: WebSocketConfig,
     connection_manager: Arc<ConnectionManager>,
+    session_store: Arc<dyn SessionStore>,
     shutdown: broadcast::Receiver<()>,
 }
 
@@ -18,11 +30,13 @@ impl HeartbeatTask {
     pub fn new(
         config: WebSocketConfig,
         connection_manager: Arc<ConnectionManager>,
+        session_store: Arc<dyn SessionStore>,
         shutdown: broadcast::Receiver<()>,
     ) -> Self {
         Self {
             config,
             connection_manager,
+            session_store,
             shutdown,
         }
     }
@@ -55,6 +69,7 @@ impl HeartbeatTask {
                 }
                 _ = heartbeat_timer.tick() => {
                     self.send_heartbeats().await;
+                    self.refresh_cluster_sessions().await;
                 }
                 _ = cleanup_timer.tick() => {
                     self.cleanup_stale_connections(connection_timeout).await;
@@ -65,38 +80,96 @@ impl HeartbeatTask {
         tracing::info!("Heartbeat task stopped");
     }
 
-    /// Send heartbeat (ping) to all connections
+    /// Send heartbeat (ping) to all connections in parallel with batching
     async fn send_heartbeats(&self) {
         let connections = self.connection_manager.get_all_connections();
-        let count = connections.len();
+        let total_count = connections.len();
 
-        if count == 0 {
+        if total_count == 0 {
             return;
         }
 
-        let mut sent = 0;
-        let mut failed = 0;
+        let start = Instant::now();
+        let sent = Arc::new(AtomicUsize::new(0));
+        let failed = Arc::new(AtomicUsize::new(0));
+        let timed_out = Arc::new(AtomicUsize::new(0));
 
-        for handle in connections {
-            match handle.send(ServerMessage::Heartbeat).await {
-                Ok(_) => sent += 1,
-                Err(_) => {
-                    failed += 1;
-                    // Connection is dead, it will be cleaned up by the cleanup task
-                    tracing::debug!(
-                        connection_id = %handle.id,
-                        "Failed to send heartbeat, connection may be dead"
-                    );
-                }
-            }
+        // Process in batches to avoid overwhelming the system
+        for batch in connections.chunks(MAX_CONCURRENT_HEARTBEATS) {
+            let futures: Vec<_> = batch
+                .iter()
+                .map(|handle| {
+                    let sent = sent.clone();
+                    let failed = failed.clone();
+                    let timed_out = timed_out.clone();
+                    let handle = handle.clone();
+
+                    async move {
+                        let send_timeout = Duration::from_millis(HEARTBEAT_SEND_TIMEOUT_MS);
+                        match timeout(send_timeout, handle.send(ServerMessage::Heartbeat)).await {
+                            Ok(Ok(_)) => {
+                                sent.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Ok(Err(_)) => {
+                                failed.fetch_add(1, Ordering::Relaxed);
+                                tracing::debug!(
+                                    connection_id = %handle.id,
+                                    "Failed to send heartbeat, connection may be dead"
+                                );
+                            }
+                            Err(_) => {
+                                timed_out.fetch_add(1, Ordering::Relaxed);
+                                tracing::debug!(
+                                    connection_id = %handle.id,
+                                    timeout_ms = HEARTBEAT_SEND_TIMEOUT_MS,
+                                    "Heartbeat send timed out"
+                                );
+                            }
+                        }
+                    }
+                })
+                .collect();
+
+            // Execute batch in parallel
+            join_all(futures).await;
         }
 
-        tracing::debug!(
-            total = count,
-            sent = sent,
-            failed = failed,
-            "Heartbeat round completed"
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+        let sent_count = sent.load(Ordering::Relaxed);
+        let failed_count = failed.load(Ordering::Relaxed);
+        let timed_out_count = timed_out.load(Ordering::Relaxed);
+
+        // Record metrics
+        HeartbeatMetrics::record_duration_ms(elapsed_ms);
+        if timed_out_count > 0 {
+            HeartbeatMetrics::record_timeouts(timed_out_count as u64);
+        }
+
+        // Update memory metrics during heartbeat
+        MemoryMetrics::update_process_memory();
+        MemoryMetrics::update_connection_manager_memory(
+            total_count,
+            self.connection_manager.total_subscriptions(),
         );
+
+        tracing::debug!(
+            total = total_count,
+            sent = sent_count,
+            failed = failed_count,
+            timed_out = timed_out_count,
+            elapsed_ms = elapsed_ms,
+            "Heartbeat round completed (parallel)"
+        );
+
+        // Warn if heartbeat round is taking too long
+        if elapsed_ms > (self.config.heartbeat_interval * 1000 / 2) {
+            tracing::warn!(
+                elapsed_ms = elapsed_ms,
+                heartbeat_interval_ms = self.config.heartbeat_interval * 1000,
+                connections = total_count,
+                "Heartbeat round took more than 50% of interval"
+            );
+        }
     }
 
     /// Clean up stale connections
@@ -111,21 +184,53 @@ impl HeartbeatTask {
             );
         }
     }
+
+    /// Refresh cluster session TTLs
+    async fn refresh_cluster_sessions(&self) {
+        if !self.session_store.is_enabled() {
+            return;
+        }
+
+        match self.session_store.refresh_sessions().await {
+            Ok(refreshed) => {
+                if refreshed > 0 {
+                    tracing::debug!(
+                        refreshed = refreshed,
+                        server_id = %self.session_store.server_id(),
+                        "Refreshed cluster sessions"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to refresh cluster sessions"
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cluster::{create_session_store, ClusterConfig};
     use crate::websocket::OutboundMessage;
     use tokio::sync::mpsc;
+
+    fn create_test_session_store() -> Arc<dyn SessionStore> {
+        let config = ClusterConfig::default();
+        create_session_store(&config, None)
+    }
 
     #[tokio::test]
     async fn test_heartbeat_task_shutdown() {
         let config = WebSocketConfig::default();
         let connection_manager = Arc::new(ConnectionManager::new());
+        let session_store = create_test_session_store();
         let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
 
-        let task = HeartbeatTask::new(config, connection_manager, shutdown_rx);
+        let task = HeartbeatTask::new(config, connection_manager, session_store, shutdown_rx);
 
         // Spawn the task
         let handle = tokio::spawn(async move {
@@ -152,13 +257,14 @@ mod tests {
             ..Default::default()
         };
         let connection_manager = Arc::new(ConnectionManager::new());
+        let session_store = create_test_session_store();
         let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
 
         // Register a test connection with OutboundMessage channel
         let (tx, mut rx) = mpsc::channel::<OutboundMessage>(10);
         let _handle = connection_manager.register("user1".to_string(), "default".to_string(), vec![], tx).unwrap();
 
-        let task = HeartbeatTask::new(config, connection_manager, shutdown_rx);
+        let task = HeartbeatTask::new(config, connection_manager, session_store, shutdown_rx);
 
         // Spawn the task
         let task_handle = tokio::spawn(async move {

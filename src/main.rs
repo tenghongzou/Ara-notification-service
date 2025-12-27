@@ -1,10 +1,13 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use tokio::net::TcpListener;
 use tokio::signal;
+use tokio::time::timeout;
 
+use ara_notification_service::cluster::RoutedMessageSubscriber;
 use ara_notification_service::config::Settings;
 use ara_notification_service::server::{create_app, AppState};
 use ara_notification_service::tasks::HeartbeatTask;
@@ -47,11 +50,32 @@ async fn main() -> Result<()> {
     let heartbeat_task = HeartbeatTask::new(
         settings.websocket.clone(),
         state.connection_manager.clone(),
+        state.session_store.clone(),
         shutdown_signal.subscribe(),
     );
     let heartbeat_handle = tokio::spawn(async move {
         heartbeat_task.run().await;
     });
+
+    // Start cluster routed message subscriber in background (if cluster mode is enabled and Redis is available)
+    let cluster_handle = if settings.cluster.enabled {
+        if let Some(ref redis_pool) = state.redis_pool {
+            let subscriber = RoutedMessageSubscriber::new(
+                settings.cluster.clone(),
+                redis_pool.clone(),
+                state.cluster_router.clone(),
+                shutdown_signal.subscribe(),
+            );
+            Some(tokio::spawn(async move {
+                subscriber.run().await;
+            }))
+        } else {
+            tracing::warn!("Cluster mode enabled but Redis pool not available, skipping routed message subscriber");
+            None
+        }
+    } else {
+        None
+    };
 
     // Create Axum app
     let app = create_app(state);
@@ -70,9 +94,31 @@ async fn main() -> Result<()> {
     .with_graceful_shutdown(shutdown_signal_handler(shutdown_signal))
     .await?;
 
-    // Wait for background tasks to finish
-    tracing::info!("Waiting for background tasks to finish...");
-    let _ = tokio::join!(redis_handle, heartbeat_handle);
+    // Wait for background tasks to finish with timeout
+    const SHUTDOWN_TIMEOUT_SECS: u64 = 30;
+    tracing::info!(
+        timeout_secs = SHUTDOWN_TIMEOUT_SECS,
+        "Waiting for background tasks to finish..."
+    );
+
+    let shutdown_future = async {
+        let _ = tokio::join!(redis_handle, heartbeat_handle);
+        if let Some(handle) = cluster_handle {
+            let _ = handle.await;
+        }
+    };
+
+    match timeout(Duration::from_secs(SHUTDOWN_TIMEOUT_SECS), shutdown_future).await {
+        Ok(_) => {
+            tracing::info!("All background tasks completed gracefully");
+        }
+        Err(_) => {
+            tracing::warn!(
+                timeout_secs = SHUTDOWN_TIMEOUT_SECS,
+                "Shutdown timeout exceeded, forcing exit"
+            );
+        }
+    }
 
     tracing::info!("Server shutdown complete");
     Ok(())

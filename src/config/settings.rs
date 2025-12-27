@@ -2,6 +2,7 @@ use config::{Config, ConfigError, Environment, File};
 use serde::Deserialize;
 use std::env;
 
+use crate::cluster::ClusterConfig;
 use crate::tenant::TenantConfig;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -24,6 +25,8 @@ pub struct Settings {
     pub tenant: TenantConfig,
     #[serde(default)]
     pub database: DatabaseConfig,
+    #[serde(default)]
+    pub cluster: ClusterConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -46,6 +49,20 @@ pub struct RateLimitConfig {
     /// Cleanup interval for stale buckets (seconds)
     #[serde(default = "default_ratelimit_cleanup_interval")]
     pub cleanup_interval_seconds: u64,
+    /// Backend type: "local" or "redis" (default: "local")
+    #[serde(default = "default_ratelimit_backend")]
+    pub backend: String,
+    /// Redis key prefix for rate limit data
+    #[serde(default = "default_ratelimit_redis_prefix")]
+    pub redis_prefix: String,
+}
+
+fn default_ratelimit_backend() -> String {
+    "local".to_string()
+}
+
+fn default_ratelimit_redis_prefix() -> String {
+    "ara:ratelimit".to_string()
 }
 
 fn default_http_requests_per_second() -> u32 {
@@ -414,6 +431,11 @@ impl Settings {
             .set_default("database.pool_size", 10)?
             .set_default("database.connect_timeout_seconds", 30)?
             .set_default("database.idle_timeout_seconds", 600)?
+            // Cluster mode defaults
+            .set_default("cluster.enabled", false)?
+            .set_default("cluster.session_prefix", "ara:cluster:sessions")?
+            .set_default("cluster.session_ttl_seconds", 60)?
+            .set_default("cluster.routing_channel", "ara:cluster:route")?
             // Load config file if exists
             .add_source(File::with_name("config/default").required(false))
             .add_source(File::with_name(&format!("config/{}", run_mode)).required(false))
@@ -493,6 +515,8 @@ impl Default for RateLimitConfig {
             ws_connections_per_minute: default_ws_connections_per_minute(),
             ws_messages_per_second: default_ws_messages_per_second(),
             cleanup_interval_seconds: default_ratelimit_cleanup_interval(),
+            backend: default_ratelimit_backend(),
+            redis_prefix: default_ratelimit_redis_prefix(),
         }
     }
 }
