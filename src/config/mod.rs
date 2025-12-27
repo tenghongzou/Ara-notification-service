@@ -1,3 +1,3 @@
 mod settings;
 
-pub use settings::{JwtConfig, RedisConfig, Settings, WebSocketConfig};
+pub use settings::{JwtConfig, OtelConfig, RedisConfig, Settings, WebSocketConfig};

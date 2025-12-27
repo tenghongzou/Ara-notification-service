@@ -1,13 +1,22 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use futures::stream::{FuturesUnordered, StreamExt};
 use serde::Serialize;
 use uuid::Uuid;
 
-use crate::connection_manager::ConnectionManager;
-use crate::websocket::ServerMessage;
+use crate::connection_manager::{ConnectionHandle, ConnectionManager};
+use crate::metrics::MessageMetrics;
+use crate::queue::UserMessageQueue;
+use crate::websocket::{OutboundMessage, ServerMessage};
 
-use super::{NotificationEvent, NotificationTarget};
+use super::{AckTracker, NotificationEvent, NotificationTarget};
+
+/// Maximum number of concurrent message sends
+const MAX_CONCURRENT_SENDS: usize = 100;
+
+/// Threshold for using pre-serialization (saves serialization overhead for larger sends)
+const PRESERIALIZATION_THRESHOLD: usize = 4;
 
 /// Result of a notification delivery attempt
 #[derive(Debug, Clone, Serialize)]
@@ -77,6 +86,8 @@ pub struct DispatcherStatsSnapshot {
 /// Dispatches notifications to connected clients
 pub struct NotificationDispatcher {
     connection_manager: Arc<ConnectionManager>,
+    message_queue: Option<Arc<UserMessageQueue>>,
+    ack_tracker: Option<Arc<AckTracker>>,
     stats: DispatcherStats,
 }
 
@@ -85,8 +96,44 @@ impl NotificationDispatcher {
     pub fn new(connection_manager: Arc<ConnectionManager>) -> Self {
         Self {
             connection_manager,
+            message_queue: None,
+            ack_tracker: None,
             stats: DispatcherStats::default(),
         }
+    }
+
+    /// Create a new dispatcher with message queue support
+    pub fn with_queue(connection_manager: Arc<ConnectionManager>, queue: Arc<UserMessageQueue>) -> Self {
+        Self {
+            connection_manager,
+            message_queue: Some(queue),
+            ack_tracker: None,
+            stats: DispatcherStats::default(),
+        }
+    }
+
+    /// Create a new dispatcher with full configuration
+    pub fn with_config(
+        connection_manager: Arc<ConnectionManager>,
+        queue: Arc<UserMessageQueue>,
+        ack_tracker: Arc<AckTracker>,
+    ) -> Self {
+        Self {
+            connection_manager,
+            message_queue: Some(queue),
+            ack_tracker: Some(ack_tracker),
+            stats: DispatcherStats::default(),
+        }
+    }
+
+    /// Set the message queue (for deferred initialization)
+    pub fn set_message_queue(&mut self, queue: Arc<UserMessageQueue>) {
+        self.message_queue = Some(queue);
+    }
+
+    /// Set the ACK tracker (for deferred initialization)
+    pub fn set_ack_tracker(&mut self, tracker: Arc<AckTracker>) {
+        self.ack_tracker = Some(tracker);
     }
 
     /// Get dispatcher statistics
@@ -95,6 +142,15 @@ impl NotificationDispatcher {
     }
 
     /// Dispatch a notification to the specified target
+    #[tracing::instrument(
+        name = "dispatcher.dispatch",
+        skip(self, event),
+        fields(
+            notification_id = %event.id,
+            event_type = %event.event_type,
+            target_type = ?std::mem::discriminant(&target)
+        )
+    )]
     pub async fn dispatch(&self, target: NotificationTarget, event: NotificationEvent) -> DeliveryResult {
         // Skip expired notifications
         if event.is_expired() {
@@ -115,18 +171,58 @@ impl NotificationDispatcher {
     }
 
     /// Send notification to a specific user (all their connections)
+    /// If the user is offline and queue is enabled, the message will be queued for later delivery.
+    #[tracing::instrument(
+        name = "dispatcher.send_to_user",
+        skip(self, event),
+        fields(notification_id = %event.id, event_type = %event.event_type)
+    )]
     pub async fn send_to_user(&self, user_id: &str, event: NotificationEvent) -> DeliveryResult {
         let notification_id = event.id;
         let connections = self.connection_manager.get_user_connections(user_id);
-        let message = ServerMessage::Notification { event };
 
-        let (delivered, failed) = self.send_to_connections(&connections, &message).await;
+        // If user has no connections and queue is enabled, queue the message
+        if connections.is_empty() {
+            if let Some(ref queue) = self.message_queue {
+                if queue.is_enabled() {
+                    match queue.enqueue(user_id, event.clone()) {
+                        Ok(()) => {
+                            tracing::debug!(
+                                user_id = %user_id,
+                                notification_id = %notification_id,
+                                "User offline, message queued for later delivery"
+                            );
+                            // Update stats - message was queued, not delivered yet
+                            self.stats.total_sent.fetch_add(1, Ordering::Relaxed);
+                            self.stats.user_notifications.fetch_add(1, Ordering::Relaxed);
+                            return DeliveryResult::new(notification_id, 0, 0);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                user_id = %user_id,
+                                notification_id = %notification_id,
+                                error = %e,
+                                "Failed to queue message for offline user"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        let message = ServerMessage::Notification { event };
+        let (delivered, failed) = self.send_to_connections(&connections, &message, Some(notification_id)).await;
 
         // Update stats
         self.stats.total_sent.fetch_add(1, Ordering::Relaxed);
         self.stats.total_delivered.fetch_add(delivered as u64, Ordering::Relaxed);
         self.stats.total_failed.fetch_add(failed as u64, Ordering::Relaxed);
         self.stats.user_notifications.fetch_add(1, Ordering::Relaxed);
+
+        // Update Prometheus metrics
+        MessageMetrics::record_user_sent();
+        MessageMetrics::record_delivered(delivered as u64);
+        MessageMetrics::record_failed(failed as u64);
 
         tracing::debug!(
             user_id = %user_id,
@@ -140,16 +236,38 @@ impl NotificationDispatcher {
     }
 
     /// Send notification to multiple users
+    /// Offline users will have messages queued if queue is enabled.
+    #[tracing::instrument(
+        name = "dispatcher.send_to_users",
+        skip(self, event, user_ids),
+        fields(
+            notification_id = %event.id,
+            event_type = %event.event_type,
+            user_count = user_ids.len()
+        )
+    )]
     pub async fn send_to_users(&self, user_ids: &[String], event: NotificationEvent) -> DeliveryResult {
         let notification_id = event.id;
-        let message = ServerMessage::Notification { event };
+        let message = ServerMessage::Notification { event: event.clone() };
 
         let mut total_delivered = 0;
         let mut total_failed = 0;
+        let mut queued_count = 0;
 
         for user_id in user_ids {
             let connections = self.connection_manager.get_user_connections(user_id);
-            let (delivered, failed) = self.send_to_connections(&connections, &message).await;
+
+            // If user has no connections and queue is enabled, queue the message
+            if connections.is_empty() {
+                if let Some(ref queue) = self.message_queue {
+                    if queue.is_enabled() && queue.enqueue(user_id, event.clone()).is_ok() {
+                        queued_count += 1;
+                        continue;
+                    }
+                }
+            }
+
+            let (delivered, failed) = self.send_to_connections(&connections, &message, Some(notification_id)).await;
             total_delivered += delivered;
             total_failed += failed;
         }
@@ -160,11 +278,17 @@ impl NotificationDispatcher {
         self.stats.total_failed.fetch_add(total_failed as u64, Ordering::Relaxed);
         self.stats.user_notifications.fetch_add(1, Ordering::Relaxed);
 
+        // Update Prometheus metrics
+        MessageMetrics::record_users_sent();
+        MessageMetrics::record_delivered(total_delivered as u64);
+        MessageMetrics::record_failed(total_failed as u64);
+
         tracing::debug!(
             user_count = user_ids.len(),
             notification_id = %notification_id,
             delivered = total_delivered,
             failed = total_failed,
+            queued = queued_count,
             "Sent notification to multiple users"
         );
 
@@ -172,18 +296,28 @@ impl NotificationDispatcher {
     }
 
     /// Broadcast notification to all connected users
+    #[tracing::instrument(
+        name = "dispatcher.broadcast",
+        skip(self, event),
+        fields(notification_id = %event.id, event_type = %event.event_type)
+    )]
     pub async fn broadcast(&self, event: NotificationEvent) -> DeliveryResult {
         let notification_id = event.id;
         let connections = self.connection_manager.get_all_connections();
         let message = ServerMessage::Notification { event };
 
-        let (delivered, failed) = self.send_to_connections(&connections, &message).await;
+        let (delivered, failed) = self.send_to_connections(&connections, &message, Some(notification_id)).await;
 
         // Update stats
         self.stats.total_sent.fetch_add(1, Ordering::Relaxed);
         self.stats.total_delivered.fetch_add(delivered as u64, Ordering::Relaxed);
         self.stats.total_failed.fetch_add(failed as u64, Ordering::Relaxed);
         self.stats.broadcast_notifications.fetch_add(1, Ordering::Relaxed);
+
+        // Update Prometheus metrics
+        MessageMetrics::record_broadcast_sent();
+        MessageMetrics::record_delivered(delivered as u64);
+        MessageMetrics::record_failed(failed as u64);
 
         tracing::debug!(
             notification_id = %notification_id,
@@ -196,18 +330,28 @@ impl NotificationDispatcher {
     }
 
     /// Send notification to a specific channel
+    #[tracing::instrument(
+        name = "dispatcher.send_to_channel",
+        skip(self, event),
+        fields(notification_id = %event.id, event_type = %event.event_type)
+    )]
     pub async fn send_to_channel(&self, channel: &str, event: NotificationEvent) -> DeliveryResult {
         let notification_id = event.id;
         let connections = self.connection_manager.get_channel_connections(channel);
         let message = ServerMessage::Notification { event };
 
-        let (delivered, failed) = self.send_to_connections(&connections, &message).await;
+        let (delivered, failed) = self.send_to_connections(&connections, &message, Some(notification_id)).await;
 
         // Update stats
         self.stats.total_sent.fetch_add(1, Ordering::Relaxed);
         self.stats.total_delivered.fetch_add(delivered as u64, Ordering::Relaxed);
         self.stats.total_failed.fetch_add(failed as u64, Ordering::Relaxed);
         self.stats.channel_notifications.fetch_add(1, Ordering::Relaxed);
+
+        // Update Prometheus metrics
+        MessageMetrics::record_channel_sent();
+        MessageMetrics::record_delivered(delivered as u64);
+        MessageMetrics::record_failed(failed as u64);
 
         tracing::debug!(
             channel = %channel,
@@ -221,6 +365,15 @@ impl NotificationDispatcher {
     }
 
     /// Send notification to multiple channels
+    #[tracing::instrument(
+        name = "dispatcher.send_to_channels",
+        skip(self, event, channels),
+        fields(
+            notification_id = %event.id,
+            event_type = %event.event_type,
+            channel_count = channels.len()
+        )
+    )]
     pub async fn send_to_channels(&self, channels: &[String], event: NotificationEvent) -> DeliveryResult {
         let notification_id = event.id;
         let message = ServerMessage::Notification { event };
@@ -237,13 +390,18 @@ impl NotificationDispatcher {
             }
         }
 
-        let (delivered, failed) = self.send_to_connections(&all_connections, &message).await;
+        let (delivered, failed) = self.send_to_connections(&all_connections, &message, Some(notification_id)).await;
 
         // Update stats
         self.stats.total_sent.fetch_add(1, Ordering::Relaxed);
         self.stats.total_delivered.fetch_add(delivered as u64, Ordering::Relaxed);
         self.stats.total_failed.fetch_add(failed as u64, Ordering::Relaxed);
         self.stats.channel_notifications.fetch_add(1, Ordering::Relaxed);
+
+        // Update Prometheus metrics
+        MessageMetrics::record_channels_sent();
+        MessageMetrics::record_delivered(delivered as u64);
+        MessageMetrics::record_failed(failed as u64);
 
         tracing::debug!(
             channels = ?channels,
@@ -256,19 +414,101 @@ impl NotificationDispatcher {
         DeliveryResult::new(notification_id, delivered, failed)
     }
 
-    /// Send message to a list of connections
+    /// Send message to a list of connections concurrently
+    /// Uses bounded parallelism to avoid overwhelming the system
+    /// Pre-serializes the message once for larger sends to avoid repeated serialization
+    /// If notification_id is provided and ack_tracker is configured, tracks pending ACKs
     async fn send_to_connections(
         &self,
-        connections: &[Arc<crate::connection_manager::ConnectionHandle>],
+        connections: &[Arc<ConnectionHandle>],
         message: &ServerMessage,
+        notification_id: Option<Uuid>,
     ) -> (usize, usize) {
+        if connections.is_empty() {
+            return (0, 0);
+        }
+
+        // For small number of connections, use simple sequential sending without pre-serialization
+        if connections.len() <= 3 {
+            let mut delivered = 0;
+            let mut failed = 0;
+            for conn in connections {
+                match conn.send(message.clone()).await {
+                    Ok(_) => {
+                        delivered += 1;
+                        // Track ACK if enabled
+                        if let (Some(notif_id), Some(tracker)) = (notification_id, &self.ack_tracker) {
+                            tracker.track(notif_id, &conn.user_id, conn.id);
+                        }
+                    }
+                    Err(_) => failed += 1,
+                }
+            }
+            return (delivered, failed);
+        }
+
+        // For larger sends, pre-serialize once and share across all connections
+        // This avoids repeated serde_json::to_string calls
+        let outbound = if connections.len() >= PRESERIALIZATION_THRESHOLD {
+            match OutboundMessage::preserialized(message) {
+                Ok(msg) => msg,
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to pre-serialize message, falling back to per-connection serialization");
+                    OutboundMessage::Raw(message.clone())
+                }
+            }
+        } else {
+            OutboundMessage::Raw(message.clone())
+        };
+
+        // For larger number of connections, use concurrent sending with bounded parallelism
+        // We need to track which connections succeeded for ACK tracking
+        let mut futures = FuturesUnordered::new();
         let mut delivered = 0;
         let mut failed = 0;
+        let mut pending = 0;
 
         for conn in connections {
-            match conn.send(message.clone()).await {
-                Ok(_) => delivered += 1,
-                Err(_) => failed += 1,
+            let conn = conn.clone();
+            let msg = outbound.clone();
+            // Return the connection on success so we can track ACKs
+            futures.push(async move {
+                match conn.send_preserialized(msg).await {
+                    Ok(_) => Some(conn),
+                    Err(_) => None,
+                }
+            });
+            pending += 1;
+
+            // Process completed futures when we hit the concurrency limit
+            while pending >= MAX_CONCURRENT_SENDS {
+                if let Some(result) = futures.next().await {
+                    pending -= 1;
+                    match result {
+                        Some(conn) => {
+                            delivered += 1;
+                            if let (Some(notif_id), Some(tracker)) = (notification_id, &self.ack_tracker) {
+                                tracker.track(notif_id, &conn.user_id, conn.id);
+                            }
+                        }
+                        None => failed += 1,
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+
+        // Process remaining futures
+        while let Some(result) = futures.next().await {
+            match result {
+                Some(conn) => {
+                    delivered += 1;
+                    if let (Some(notif_id), Some(tracker)) = (notification_id, &self.ack_tracker) {
+                        tracker.track(notif_id, &conn.user_id, conn.id);
+                    }
+                }
+                None => failed += 1,
             }
         }
 

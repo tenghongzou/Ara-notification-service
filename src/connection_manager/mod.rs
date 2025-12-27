@@ -1,3 +1,6 @@
 mod registry;
 
-pub use registry::{ConnectionHandle, ConnectionManager};
+pub use registry::{
+    ChannelInfo, ConnectionError, ConnectionHandle, ConnectionLimits, ConnectionManager,
+    TenantConnectionStats, UserSubscriptionInfo,
+};

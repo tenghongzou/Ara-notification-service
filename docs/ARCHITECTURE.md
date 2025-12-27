@@ -6,6 +6,7 @@
 
 - [概覽](#概覽)
 - [核心元件](#核心元件)
+- [安全機制](#安全機制)
 - [資料流程](#資料流程)
 - [背景任務](#背景任務)
 - [併發設計](#併發設計)
@@ -111,7 +112,7 @@ pub struct AppState {
 
 ### ConnectionManager
 
-連線管理器，維護三個 DashMap 索引以支援不同查詢模式。
+連線管理器，維護三個 DashMap 索引以支援不同查詢模式，並實作連線數限制。
 
 **檔案位置：** `src/connection_manager/registry.rs`
 
@@ -120,6 +121,13 @@ pub struct ConnectionManager {
     connections: DashMap<Uuid, Arc<ConnectionHandle>>,      // 主索引
     user_index: DashMap<String, HashSet<Uuid>>,            // 使用者 → 連線
     channel_index: DashMap<String, HashSet<Uuid>>,         // 頻道 → 連線
+    limits: ConnectionLimits,                               // 連線限制配置
+}
+
+pub struct ConnectionLimits {
+    pub max_connections: usize,                // 最大總連線數（預設 10000）
+    pub max_connections_per_user: usize,       // 每使用者最大連線數（預設 5）
+    pub max_subscriptions_per_connection: usize, // 每連線最大訂閱數（預設 50）
 }
 ```
 
@@ -135,13 +143,22 @@ pub struct ConnectionManager {
 
 | 方法 | 說明 |
 |------|------|
-| `register()` | 註冊新連線，更新 connections + user_index |
-| `unregister()` | 移除連線，清理所有索引 |
-| `subscribe_to_channel()` | 訂閱頻道，更新 channel_index + 連線的 subscriptions |
+| `register()` | 註冊新連線（含限制檢查），回傳 `Result<Arc<ConnectionHandle>, ConnectionError>` |
+| `unregister()` | 移除連線，清理所有索引（async，僅清理已訂閱頻道） |
+| `subscribe_to_channel()` | 訂閱頻道（含限制檢查），回傳 `Result<(), String>` |
 | `unsubscribe_from_channel()` | 取消訂閱 |
 | `get_user_connections()` | 取得使用者所有連線 |
 | `get_channel_connections()` | 取得頻道所有訂閱者 |
 | `cleanup_stale_connections()` | 清理閒置連線 |
+
+**連線錯誤類型：**
+
+```rust
+pub enum ConnectionError {
+    TotalLimitExceeded { current: usize, max: usize },
+    UserLimitExceeded { user_id: String, current: usize, max: usize },
+}
+```
 
 ### ConnectionHandle
 
@@ -153,9 +170,10 @@ pub struct ConnectionManager {
 pub struct ConnectionHandle {
     pub id: Uuid,                              // 連線 UUID
     pub user_id: String,                       // 使用者 ID（從 JWT 解析）
-    pub sender: mpsc::Sender<ServerMessage>,   // 訊息發送通道（32 緩衝）
+    pub roles: Vec<String>,                    // 使用者角色（從 JWT 解析）
+    pub sender: mpsc::Sender<OutboundMessage>, // 訊息發送通道（32 緩衝）
     pub connected_at: DateTime<Utc>,           // 連線時間
-    pub last_activity: RwLock<DateTime<Utc>>,  // 最後活動時間
+    last_activity: AtomicI64,                  // 最後活動時間（Unix timestamp，無鎖）
     pub subscriptions: RwLock<HashSet<String>>,// 已訂閱頻道
 }
 ```
@@ -164,6 +182,11 @@ pub struct ConnectionHandle {
 - 緩衝大小：32 訊息
 - 滿載行為：發送失敗，標記連線異常
 - 接收端：WebSocket handler 的發送迴圈
+- 支援預序列化：`OutboundMessage` 可為 `Raw(ServerMessage)` 或 `Serialized(Arc<str>)`
+
+**無鎖活動追蹤：**
+- `last_activity` 使用 `AtomicI64` 儲存 Unix timestamp
+- 避免 RwLock 開銷，適合高頻更新場景
 
 ### NotificationDispatcher
 
@@ -226,8 +249,175 @@ pub struct Claims {
     pub iat: Option<usize>,       // 簽發時間
     pub iss: Option<String>,      // 簽發者
     pub aud: Option<String>,      // 受眾
-    pub roles: Option<Vec<String>>, // 角色（選填）
+    pub roles: Vec<String>,       // 角色（預設空陣列）
 }
+```
+
+---
+
+## 安全機制
+
+服務實作多層安全防護，涵蓋認證、授權、限流與錯誤處理。
+
+### 認證層
+
+| 機制 | 適用範圍 | 實作位置 |
+|------|----------|----------|
+| JWT Token | WebSocket 連線 | `src/websocket/handler.rs` |
+| API Key | HTTP REST API | `src/server/middleware.rs` |
+
+#### API Key 中介層
+
+**檔案位置：** `src/server/middleware.rs`
+
+```rust
+pub async fn api_key_auth(
+    State(state): State<AppState>,
+    req: Request<Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    // 若未設定 API_KEY，跳過驗證（開發模式）
+    let Some(expected_key) = &state.settings.api.key else {
+        return Ok(next.run(req).await);
+    };
+
+    // 檢查 X-API-Key header
+    let api_key = req.headers()
+        .get("X-API-Key")
+        .and_then(|v| v.to_str().ok());
+
+    match api_key {
+        Some(key) if key == expected_key => Ok(next.run(req).await),
+        _ => Err(StatusCode::UNAUTHORIZED),
+    }
+}
+```
+
+**路由保護：**
+
+```
+公開路由（無需認證）：
+  - GET /health
+  - WS /ws（需 JWT）
+
+受保護路由（需 API Key）：
+  - GET /stats
+  - POST /api/v1/notifications/*
+```
+
+### 限流層
+
+| 限制類型 | 預設值 | 環境變數 | 說明 |
+|----------|--------|----------|------|
+| 總連線數 | 10,000 | `WEBSOCKET_MAX_CONNECTIONS` | 防止資源耗盡 |
+| 每用戶連線數 | 5 | `WEBSOCKET_MAX_CONNECTIONS_PER_USER` | 防止單用戶濫用 |
+| 每連線訂閱數 | 50 | `WEBSOCKET_MAX_SUBSCRIPTIONS_PER_CONNECTION` | 防止頻道爆炸 |
+| 請求 Body 大小 | 64 KB | (硬編碼) | 防止大請求攻擊 |
+
+**限流流程：**
+
+```
+WebSocket 連線
+    │
+    ├── 檢查總連線數 ──── 超過 → 回傳 CONNECTION_LIMIT 錯誤並關閉
+    │
+    ├── 檢查用戶連線數 ── 超過 → 回傳 CONNECTION_LIMIT 錯誤並關閉
+    │
+    └── 註冊成功
+
+頻道訂閱
+    │
+    ├── 檢查訂閱數量 ──── 超過 → 回傳 SUBSCRIPTION_ERROR 錯誤
+    │
+    └── 訂閱成功
+```
+
+### CORS 控制
+
+**檔案位置：** `src/server/app.rs`
+
+```rust
+fn build_cors_layer(origins: &[String]) -> CorsLayer {
+    if origins.is_empty() {
+        // 開發模式：允許全部（警告）
+        tracing::warn!("CORS: No origins configured, allowing any origin");
+        CorsLayer::new().allow_origin(Any)...
+    } else {
+        // 生產模式：限制來源
+        CorsLayer::new().allow_origin(AllowOrigin::list(origins))...
+    }
+}
+```
+
+**設定方式：**
+- 開發模式：`CORS_ORIGINS` 留空，允許任何來源
+- 生產模式：設定 `CORS_ORIGINS=https://app.example.com,https://admin.example.com`
+
+### 錯誤遮蔽
+
+**檔案位置：** `src/error/mod.rs`
+
+生產模式下隱藏內部錯誤詳情，防止資訊洩露：
+
+```rust
+fn is_production() -> bool {
+    std::env::var("RUN_MODE")
+        .map(|m| m == "production" || m == "prod")
+        .unwrap_or(false)
+}
+
+// 生產模式
+AppError::Internal(_) => "Internal server error"
+AppError::Redis(_) => "Service temporarily unavailable"
+AppError::Config(_) => "Configuration error"
+
+// 開發模式
+AppError::Internal(e) => e.to_string()  // 顯示完整錯誤
+```
+
+### 安全架構圖
+
+```
+                                    ┌─────────────────────────────────┐
+                                    │         外部請求                 │
+                                    └───────────────┬─────────────────┘
+                                                    │
+                    ┌───────────────────────────────┼───────────────────────────────┐
+                    │                               ▼                               │
+                    │                     ┌─────────────────┐                       │
+                    │                     │   CORS Layer    │ ◄── 來源檢查          │
+                    │                     └────────┬────────┘                       │
+                    │                              │                                │
+                    │              ┌───────────────┴───────────────┐                │
+                    │              │                               │                │
+                    │              ▼                               ▼                │
+                    │     ┌─────────────────┐             ┌─────────────────┐       │
+                    │     │   /ws (公開)     │             │ /api/* (受保護) │       │
+                    │     └────────┬────────┘             └────────┬────────┘       │
+                    │              │                               │                │
+                    │              ▼                               ▼                │
+                    │     ┌─────────────────┐             ┌─────────────────┐       │
+                    │     │  JWT 驗證        │             │ API Key 中介層  │       │
+                    │     └────────┬────────┘             └────────┬────────┘       │
+                    │              │                               │                │
+                    │              ▼                               ▼                │
+                    │     ┌─────────────────┐             ┌─────────────────┐       │
+                    │     │  連線限制檢查    │             │ Body 大小限制   │       │
+                    │     └────────┬────────┘             └────────┬────────┘       │
+                    │              │                               │                │
+                    │              └───────────────┬───────────────┘                │
+                    │                              │                                │
+                    │                              ▼                                │
+                    │                    ┌─────────────────┐                        │
+                    │                    │   業務邏輯處理   │                        │
+                    │                    └────────┬────────┘                        │
+                    │                             │                                 │
+                    │                             ▼                                 │
+                    │                    ┌─────────────────┐                        │
+                    │                    │   錯誤遮蔽      │ ◄── 生產模式隱藏詳情   │
+                    │                    └─────────────────┘                        │
+                    │                                                               │
+                    └───────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -405,7 +595,7 @@ notification:channel:*   # 所有頻道通知
 |------|----------|----------|
 | ConnectionManager 三索引 | `DashMap` | 分片鎖設計，高併發讀寫不阻塞 |
 | ConnectionHandle.sender | `mpsc::Sender` | 異步通道，背壓控制 |
-| ConnectionHandle.last_activity | `RwLock` | 讀多寫少（每次活動更新） |
+| ConnectionHandle.last_activity | `AtomicI64` | 無鎖更新，高頻寫入場景（每次訊息活動） |
 | ConnectionHandle.subscriptions | `RwLock` | 訂閱變更不頻繁 |
 | DispatcherStats | `AtomicU64` | 無鎖統計計數 |
 | Graceful shutdown | `broadcast::channel` | 多接收者通知 |
@@ -496,7 +686,12 @@ tokio::join!(heartbeat_handle, redis_handle);
 | `WEBSOCKET_HEARTBEAT_INTERVAL` | `websocket.heartbeat_interval` | `30` |
 | `WEBSOCKET_CONNECTION_TIMEOUT` | `websocket.connection_timeout` | `120` |
 | `WEBSOCKET_CLEANUP_INTERVAL` | `websocket.cleanup_interval` | `60` |
+| `WEBSOCKET_MAX_CONNECTIONS` | `websocket.max_connections` | `10000` |
+| `WEBSOCKET_MAX_CONNECTIONS_PER_USER` | `websocket.max_connections_per_user` | `5` |
+| `WEBSOCKET_MAX_SUBSCRIPTIONS_PER_CONNECTION` | `websocket.max_subscriptions_per_connection` | `50` |
 | `API_KEY` | `api.key` | (選填) |
+| `CORS_ORIGINS` | `server.cors_origins` | (逗號分隔) |
+| `RUN_MODE` | - | `development` |
 
 ### 配置結構
 
@@ -512,9 +707,12 @@ pub struct Settings {
 }
 
 pub struct WebSocketConfig {
-    pub heartbeat_interval: u64,    // 心跳間隔（秒）
-    pub connection_timeout: u64,    // 連線超時（秒）
-    pub cleanup_interval: u64,      // 清理間隔（秒）
+    pub heartbeat_interval: u64,              // 心跳間隔（秒）
+    pub connection_timeout: u64,              // 連線超時（秒）
+    pub cleanup_interval: u64,                // 清理間隔（秒）
+    pub max_connections: usize,               // 最大總連線數
+    pub max_connections_per_user: usize,      // 每用戶最大連線數
+    pub max_subscriptions_per_connection: usize, // 每連線最大訂閱數
 }
 ```
 
@@ -529,8 +727,18 @@ pub struct WebSocketConfig {
 | 無訊息持久化 | 訊息僅即時傳遞，不儲存歷史 | 離線使用者無法收到錯過的通知 |
 | 無離線佇列 | 使用者離線時訊息直接丟棄 | 需外部系統處理離線推播（如 Push Notification） |
 | 單節點狀態 | 連線狀態不跨節點共享 | 水平擴展需配合 Load Balancer Sticky Session |
-| 無認證限流 | 未實作連線數/請求數限制 | 需在 API Gateway 層處理 |
 | 無訊息確認 | 無 ACK 機制確認客戶端收到 | 不保證訊息送達（at-most-once） |
+
+### 已實作安全機制
+
+| 機制 | 說明 |
+|------|------|
+| API Key 認證 | HTTP API 端點需 `X-API-Key` Header |
+| 連線限制 | 總連線數 (10K) 與每用戶連線數 (5) 限制 |
+| 訂閱限制 | 每連線最多 50 個頻道訂閱 |
+| 請求大小限制 | API 請求 Body 限制 64KB |
+| CORS 控制 | 生產模式限制允許的來源 |
+| 錯誤遮蔽 | 生產模式隱藏內部錯誤詳情 |
 
 ### 未來擴展點
 
@@ -650,6 +858,7 @@ src/
 │   └── settings.rs             # Settings, JwtConfig, RedisConfig, WebSocketConfig
 ├── server/                     # 伺服器建構
 │   ├── app.rs                  # Axum 路由與中介層
+│   ├── middleware.rs           # API Key 認證中介層
 │   └── state.rs                # AppState 共享狀態
 ├── auth/                       # JWT 認證
 │   ├── jwt.rs                  # JwtValidator

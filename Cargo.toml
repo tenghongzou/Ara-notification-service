@@ -1,6 +1,6 @@
 [package]
 name = "ara-notification-service"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 authors = ["Ara Team"]
 description = "Real-time notification service with WebSocket support"
@@ -10,7 +10,7 @@ description = "Real-time notification service with WebSocket support"
 axum = { version = "0.8", features = ["ws", "macros"] }
 tokio = { version = "1", features = ["full"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "limit"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -27,10 +27,19 @@ dashmap = "6"
 
 # Async utilities
 futures = "0.3"
+tokio-stream = "0.1"
+async-stream = "0.3"
 
 # Logging & Tracing
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# OpenTelemetry
+opentelemetry = "0.27"
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.27", features = ["tonic"] }
+opentelemetry-semantic-conventions = "0.27"
+tracing-opentelemetry = "0.28"
 
 # Error handling
 thiserror = "2"
@@ -45,6 +54,13 @@ uuid = { version = "1", features = ["v4", "serde"] }
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }
+
+# Random (for jitter in backoff)
+rand = "0.8"
+
+# Prometheus metrics
+prometheus = "0.13"
+lazy_static = "1.5"
 
 [dev-dependencies]
 tokio-test = "0.4"

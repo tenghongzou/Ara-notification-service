@@ -70,6 +70,7 @@ mod tests {
             exp: chrono::Utc::now().timestamp() + 3600,
             iat: chrono::Utc::now().timestamp(),
             roles: vec!["user".to_string()],
+            tenant_id: None,
             extra: Default::default(),
         };
 

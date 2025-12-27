@@ -116,15 +116,12 @@ impl HeartbeatTask {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::websocket::OutboundMessage;
     use tokio::sync::mpsc;
 
     #[tokio::test]
     async fn test_heartbeat_task_shutdown() {
-        let config = WebSocketConfig {
-            heartbeat_interval: 1,
-            connection_timeout: 5,
-            cleanup_interval: 2,
-        };
+        let config = WebSocketConfig::default();
         let connection_manager = Arc::new(ConnectionManager::new());
         let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
 
@@ -152,13 +149,14 @@ mod tests {
             heartbeat_interval: 1,
             connection_timeout: 60,
             cleanup_interval: 60,
+            ..Default::default()
         };
         let connection_manager = Arc::new(ConnectionManager::new());
         let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
 
-        // Register a test connection
-        let (tx, mut rx) = mpsc::channel(10);
-        let _handle = connection_manager.register("user1".to_string(), tx);
+        // Register a test connection with OutboundMessage channel
+        let (tx, mut rx) = mpsc::channel::<OutboundMessage>(10);
+        let _handle = connection_manager.register("user1".to_string(), "default".to_string(), vec![], tx).unwrap();
 
         let task = HeartbeatTask::new(config, connection_manager, shutdown_rx);
 
@@ -173,7 +171,8 @@ mod tests {
             .expect("Should receive heartbeat")
             .expect("Channel should not be closed");
 
-        assert!(matches!(msg, ServerMessage::Heartbeat));
+        // Check that we received a heartbeat message
+        assert!(matches!(msg, OutboundMessage::Raw(ServerMessage::Heartbeat)));
 
         // Shutdown
         shutdown_tx.send(()).unwrap();

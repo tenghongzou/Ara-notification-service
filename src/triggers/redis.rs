@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use futures::StreamExt;
 use serde::Deserialize;
@@ -7,6 +6,10 @@ use tokio::sync::broadcast;
 
 use crate::config::RedisConfig;
 use crate::notification::{NotificationBuilder, NotificationDispatcher, NotificationTarget, Priority};
+use crate::redis::{
+    BackoffConfig, CircuitBreaker, CircuitBreakerConfig, CircuitState,
+    ExponentialBackoff, RedisHealth,
+};
 
 /// Message format received from Redis Pub/Sub
 #[derive(Debug, Deserialize)]
@@ -44,22 +47,44 @@ pub struct RedisEventData {
     pub correlation_id: Option<String>,
 }
 
-/// Redis Pub/Sub subscriber
+/// Resilient Redis Pub/Sub subscriber with circuit breaker and exponential backoff
 pub struct RedisSubscriber {
     config: RedisConfig,
     dispatcher: Arc<NotificationDispatcher>,
     shutdown: broadcast::Sender<()>,
+    circuit_breaker: Arc<CircuitBreaker>,
+    health: Arc<RedisHealth>,
 }
 
 impl RedisSubscriber {
     /// Create a new Redis subscriber
-    pub fn new(config: RedisConfig, dispatcher: Arc<NotificationDispatcher>) -> Self {
+    pub fn new(
+        config: RedisConfig,
+        dispatcher: Arc<NotificationDispatcher>,
+        circuit_breaker: Arc<CircuitBreaker>,
+        health: Arc<RedisHealth>,
+    ) -> Self {
         let (shutdown, _) = broadcast::channel(1);
         Self {
             config,
             dispatcher,
             shutdown,
+            circuit_breaker,
+            health,
         }
+    }
+
+    /// Create a new Redis subscriber with default circuit breaker and health
+    pub fn with_defaults(config: RedisConfig, dispatcher: Arc<NotificationDispatcher>) -> Self {
+        let cb_config = CircuitBreakerConfig {
+            failure_threshold: config.circuit_breaker_failure_threshold,
+            success_threshold: config.circuit_breaker_success_threshold,
+            reset_timeout_ms: config.circuit_breaker_reset_timeout_seconds * 1000,
+        };
+        let circuit_breaker = Arc::new(CircuitBreaker::with_config(cb_config));
+        let health = Arc::new(RedisHealth::new());
+
+        Self::new(config, dispatcher, circuit_breaker, health)
     }
 
     /// Get a shutdown signal sender
@@ -67,7 +92,17 @@ impl RedisSubscriber {
         self.shutdown.clone()
     }
 
-    /// Start the Redis subscriber loop
+    /// Get the circuit breaker reference
+    pub fn circuit_breaker(&self) -> Arc<CircuitBreaker> {
+        Arc::clone(&self.circuit_breaker)
+    }
+
+    /// Get the health tracker reference
+    pub fn health(&self) -> Arc<RedisHealth> {
+        Arc::clone(&self.health)
+    }
+
+    /// Start the Redis subscriber loop with resilience
     pub async fn start(&self) -> anyhow::Result<()> {
         let channels = self.get_channels();
         if channels.is_empty() {
@@ -75,17 +110,69 @@ impl RedisSubscriber {
             return Ok(());
         }
 
-        tracing::info!(channels = ?channels, "Starting Redis subscriber");
+        tracing::info!(channels = ?channels, "Starting resilient Redis subscriber");
+
+        // Create backoff configuration
+        let backoff_config = BackoffConfig {
+            initial_delay_ms: self.config.backoff_initial_delay_ms,
+            max_delay_ms: self.config.backoff_max_delay_ms,
+            multiplier: 2.0,
+            jitter_factor: 0.1,
+        };
+        let mut backoff = ExponentialBackoff::with_config(backoff_config);
 
         loop {
+            // Check circuit breaker state
+            match self.circuit_breaker.state() {
+                CircuitState::Open => {
+                    self.health.set_circuit_open();
+                    tracing::warn!("Circuit breaker is open, waiting for reset timeout");
+
+                    // Wait for circuit breaker to transition to half-open
+                    let wait_time = std::time::Duration::from_secs(
+                        self.config.circuit_breaker_reset_timeout_seconds / 2 + 1,
+                    );
+                    tokio::time::sleep(wait_time).await;
+                    continue;
+                }
+                CircuitState::HalfOpen => {
+                    tracing::info!("Circuit breaker is half-open, attempting test connection");
+                }
+                CircuitState::Closed => {
+                    // Normal operation
+                }
+            }
+
+            self.health.set_reconnecting();
+
             match self.run_subscription_loop(&channels).await {
                 Ok(()) => {
                     tracing::info!("Redis subscriber stopped gracefully");
                     break;
                 }
                 Err(e) => {
-                    tracing::error!(error = %e, "Redis subscription error, reconnecting in 5 seconds...");
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    self.circuit_breaker.record_failure();
+
+                    let delay = backoff.next_delay();
+                    tracing::error!(
+                        error = %e,
+                        attempt = backoff.attempt(),
+                        delay_ms = delay.as_millis(),
+                        circuit_state = ?self.circuit_breaker.state(),
+                        "Redis subscription error, reconnecting with backoff"
+                    );
+
+                    // Check for shutdown signal during wait
+                    let mut shutdown_rx = self.shutdown.subscribe();
+                    tokio::select! {
+                        _ = shutdown_rx.recv() => {
+                            tracing::info!("Shutdown requested during backoff");
+                            break;
+                        }
+                        _ = tokio::time::sleep(delay) => {
+                            // Continue to retry
+                        }
+                    }
                 }
             }
         }
@@ -123,6 +210,9 @@ impl RedisSubscriber {
             }
         }
 
+        // Connection successful
+        self.circuit_breaker.record_success();
+        self.health.set_connected();
         tracing::info!("Redis subscription established");
 
         let mut message_stream = pubsub.on_message();
@@ -139,6 +229,9 @@ impl RedisSubscriber {
                 msg = message_stream.next() => {
                     match msg {
                         Some(msg) => {
+                            // Record successful message receipt
+                            self.circuit_breaker.record_success();
+
                             let channel: String = msg.get_channel_name().to_string();
                             let payload: String = match msg.get_payload() {
                                 Ok(p) => p,

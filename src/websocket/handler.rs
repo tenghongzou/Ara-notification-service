@@ -14,9 +14,10 @@ use tokio::sync::mpsc;
 
 use crate::auth::Claims;
 use crate::connection_manager::ConnectionHandle;
+use crate::metrics::{WsMessageMetrics, WS_CONNECTIONS_CLOSED, WS_CONNECTIONS_OPENED, WS_CONNECTION_DURATION};
 use crate::server::AppState;
 
-use super::message::{ClientMessage, ServerMessage};
+use super::message::{ClientMessage, OutboundMessage, ServerMessage};
 
 const CHANNEL_BUFFER_SIZE: usize = 32;
 
@@ -26,6 +27,11 @@ pub struct WsQuery {
 }
 
 /// WebSocket upgrade handler
+#[tracing::instrument(
+    name = "ws.upgrade",
+    skip(ws, state, query, headers),
+    fields(has_query_token = query.token.is_some())
+)]
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
@@ -81,21 +87,64 @@ fn extract_token(query: &WsQuery, headers: &HeaderMap) -> Option<String> {
 }
 
 /// Handle an established WebSocket connection
+#[tracing::instrument(
+    name = "ws.connection",
+    skip(socket, state, claims),
+    fields(
+        user_id = %claims.sub,
+        otel.kind = "server"
+    )
+)]
 async fn handle_socket(socket: WebSocket, state: AppState, claims: Claims) {
     let user_id = claims.sub.clone();
+    let tenant_id = claims.tenant_id().to_string();
+    let roles = claims.roles.clone();
+    let connection_start = std::time::Instant::now();
 
     // Create channel for sending messages to this connection
-    let (tx, mut rx) = mpsc::channel::<ServerMessage>(CHANNEL_BUFFER_SIZE);
+    let (tx, mut rx) = mpsc::channel::<OutboundMessage>(CHANNEL_BUFFER_SIZE);
 
-    // Register connection
-    let handle = state.connection_manager.register(user_id.clone(), tx);
+    // Register connection with limit checking
+    let handle = match state.connection_manager.register(user_id.clone(), tenant_id.clone(), roles, tx) {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::warn!(user_id = %user_id, error = %e, "Connection rejected");
+            // Send error and close
+            let (mut ws_sender, _) = socket.split();
+            let error_msg = ServerMessage::error("CONNECTION_LIMIT", e.to_string());
+            if let Ok(json) = serde_json::to_string(&error_msg) {
+                let _ = ws_sender.send(Message::Text(json.into())).await;
+            }
+            let _ = ws_sender.close().await;
+            return;
+        }
+    };
     let connection_id = handle.id;
+
+    // Record connection opened metric
+    WS_CONNECTIONS_OPENED.inc();
 
     tracing::info!(
         connection_id = %connection_id,
         user_id = %user_id,
+        tenant_id = %tenant_id,
         "WebSocket connection established"
     );
+
+    // Replay any queued messages for this user
+    if state.message_queue.is_enabled() {
+        let replay_result = state.message_queue.replay(&user_id, &handle.sender).await;
+        if replay_result.replayed > 0 || replay_result.expired > 0 {
+            tracing::info!(
+                connection_id = %connection_id,
+                user_id = %user_id,
+                replayed = replay_result.replayed,
+                expired = replay_result.expired,
+                failed = replay_result.failed,
+                "Replayed queued messages on reconnect"
+            );
+        }
+    }
 
     // Split socket into sender and receiver
     let (mut ws_sender, mut ws_receiver) = socket.split();
@@ -103,7 +152,9 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: Claims) {
     // Task for sending messages from channel to WebSocket
     let send_task = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
-            let text = match serde_json::to_string(&msg) {
+            // Convert OutboundMessage to JSON string
+            // Pre-serialized messages avoid the serialization cost here
+            let text = match msg.to_json() {
                 Ok(t) => t,
                 Err(e) => {
                     tracing::error!(error = %e, "Failed to serialize message");
@@ -147,11 +198,17 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: Claims) {
     }
 
     // Unregister connection
-    state.connection_manager.unregister(connection_id);
+    state.connection_manager.unregister(connection_id).await;
+
+    // Record connection closed and duration metrics
+    WS_CONNECTIONS_CLOSED.inc();
+    let duration = connection_start.elapsed().as_secs_f64();
+    WS_CONNECTION_DURATION.observe(duration);
 
     tracing::info!(
         connection_id = %connection_id,
         user_id = %user_id,
+        duration_secs = duration,
         "WebSocket connection closed"
     );
 }
@@ -165,7 +222,7 @@ async fn process_message(
 ) -> bool {
     match msg {
         Message::Text(text) => {
-            handle.update_activity().await;
+            handle.update_activity();
 
             // Parse client message
             let client_msg: ClientMessage = match serde_json::from_str(&text) {
@@ -194,12 +251,12 @@ async fn process_message(
             true
         }
         Message::Ping(_) => {
-            handle.update_activity().await;
+            handle.update_activity();
             // Axum handles pong automatically, but we update activity
             true
         }
         Message::Pong(_) => {
-            handle.update_activity().await;
+            handle.update_activity();
             true
         }
         Message::Close(_) => {
@@ -210,6 +267,15 @@ async fn process_message(
 }
 
 /// Handle a parsed client message
+#[tracing::instrument(
+    name = "ws.message",
+    skip(state, handle),
+    fields(
+        connection_id = %handle.id,
+        user_id = %handle.user_id,
+        message_type = ?msg
+    )
+)]
 async fn handle_client_message(
     msg: ClientMessage,
     state: &AppState,
@@ -217,24 +283,75 @@ async fn handle_client_message(
 ) {
     match msg {
         ClientMessage::Subscribe { channels } => {
+            WsMessageMetrics::record_subscribe();
             handle_subscribe(channels, state, handle).await;
         }
         ClientMessage::Unsubscribe { channels } => {
+            WsMessageMetrics::record_unsubscribe();
             handle_unsubscribe(channels, state, handle).await;
         }
         ClientMessage::Ping => {
+            WsMessageMetrics::record_ping();
             let _ = handle.send(ServerMessage::Pong).await;
+        }
+        ClientMessage::Ack { notification_id } => {
+            WsMessageMetrics::record_ack();
+            handle_ack(notification_id, state, handle).await;
         }
     }
 }
 
+/// Handle notification acknowledgment
+#[tracing::instrument(
+    name = "ws.ack",
+    skip(state, handle),
+    fields(
+        connection_id = %handle.id,
+        user_id = %handle.user_id
+    )
+)]
+async fn handle_ack(
+    notification_id: uuid::Uuid,
+    state: &AppState,
+    handle: &Arc<ConnectionHandle>,
+) {
+    if !state.ack_tracker.is_enabled() {
+        // ACK tracking is disabled, ignore
+        return;
+    }
+
+    let acknowledged = state.ack_tracker.acknowledge(notification_id, &handle.user_id);
+
+    if acknowledged {
+        // Send confirmation back to client
+        let _ = handle.send(ServerMessage::acked(notification_id)).await;
+    } else {
+        // Invalid ACK - notification not found or wrong user
+        let _ = handle
+            .send(ServerMessage::error(
+                "INVALID_ACK",
+                format!("Unknown or invalid notification: {}", notification_id),
+            ))
+            .await;
+    }
+}
+
 /// Handle channel subscription
+#[tracing::instrument(
+    name = "ws.subscribe",
+    skip(state, handle),
+    fields(
+        connection_id = %handle.id,
+        channel_count = channels.len()
+    )
+)]
 async fn handle_subscribe(
     channels: Vec<String>,
     state: &AppState,
     handle: &Arc<ConnectionHandle>,
 ) {
     let mut subscribed = Vec::new();
+    let mut errors = Vec::new();
 
     for channel in channels {
         // Validate channel name
@@ -244,14 +361,26 @@ async fn handle_subscribe(
                 channel = %channel,
                 "Invalid channel name"
             );
+            errors.push(format!("Invalid channel name: {}", channel));
             continue;
         }
 
-        state
+        match state
             .connection_manager
             .subscribe_to_channel(handle.id, &channel)
-            .await;
-        subscribed.push(channel);
+            .await
+        {
+            Ok(()) => subscribed.push(channel),
+            Err(e) => {
+                tracing::warn!(
+                    connection_id = %handle.id,
+                    channel = %channel,
+                    error = %e,
+                    "Failed to subscribe to channel"
+                );
+                errors.push(e);
+            }
+        }
     }
 
     if !subscribed.is_empty() {
@@ -262,9 +391,24 @@ async fn handle_subscribe(
         );
         let _ = handle.send(ServerMessage::subscribed(subscribed)).await;
     }
+
+    // Send error for subscription limit exceeded
+    if !errors.is_empty() {
+        let _ = handle
+            .send(ServerMessage::error("SUBSCRIPTION_ERROR", errors.join("; ")))
+            .await;
+    }
 }
 
 /// Handle channel unsubscription
+#[tracing::instrument(
+    name = "ws.unsubscribe",
+    skip(state, handle),
+    fields(
+        connection_id = %handle.id,
+        channel_count = channels.len()
+    )
+)]
 async fn handle_unsubscribe(
     channels: Vec<String>,
     state: &AppState,

@@ -1,32 +1,37 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::net::TcpListener;
 use tokio::signal;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 use ara_notification_service::config::Settings;
 use ara_notification_service::server::{create_app, AppState};
 use ara_notification_service::tasks::HeartbeatTask;
+use ara_notification_service::telemetry::init_telemetry;
 use ara_notification_service::triggers::RedisSubscriber;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing
-    init_tracing();
-
-    // Load configuration
+    // Load configuration first (needed for telemetry config)
     let settings = Settings::new()?;
+
+    // Initialize telemetry (tracing + optional OpenTelemetry)
+    let _telemetry_guard = init_telemetry(&settings.otel)
+        .expect("Failed to initialize telemetry");
+
     tracing::info!("Configuration loaded");
 
     // Create application state
     let state = AppState::new(settings.clone());
     tracing::info!("Application state initialized");
 
-    // Create Redis subscriber
+    // Create Redis subscriber with circuit breaker and health from state
     let redis_subscriber = Arc::new(RedisSubscriber::new(
         settings.redis.clone(),
         state.dispatcher.clone(),
+        state.redis_circuit_breaker.clone(),
+        state.redis_health.clone(),
     ));
     let shutdown_signal = redis_subscriber.shutdown_signal();
 
@@ -57,9 +62,13 @@ async fn main() -> Result<()> {
     tracing::info!("Server listening on {}", addr);
 
     // Run server with graceful shutdown
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal_handler(shutdown_signal))
-        .await?;
+    // Use into_make_service_with_connect_info for rate limiting by IP
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal_handler(shutdown_signal))
+    .await?;
 
     // Wait for background tasks to finish
     tracing::info!("Waiting for background tasks to finish...");
@@ -67,16 +76,6 @@ async fn main() -> Result<()> {
 
     tracing::info!("Server shutdown complete");
     Ok(())
-}
-
-fn init_tracing() {
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
-
-    tracing_subscriber::registry()
-        .with(env_filter)
-        .with(tracing_subscriber::fmt::layer())
-        .init();
 }
 
 async fn shutdown_signal_handler(shutdown_tx: tokio::sync::broadcast::Sender<()>) {
