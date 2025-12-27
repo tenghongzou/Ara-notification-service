@@ -77,6 +77,12 @@ pub struct AckSettingsConfig {
     /// Cleanup interval for expired ACKs in seconds (default: 60)
     #[serde(default = "default_ack_cleanup_interval")]
     pub cleanup_interval_seconds: u64,
+    /// Backend type: "memory" or "redis" (default: "memory")
+    #[serde(default = "default_ack_backend")]
+    pub backend: String,
+    /// Redis key prefix for ACK data (default: "ara:ack")
+    #[serde(default = "default_ack_redis_prefix")]
+    pub redis_prefix: String,
 }
 
 fn default_ack_timeout() -> u64 {
@@ -87,12 +93,22 @@ fn default_ack_cleanup_interval() -> u64 {
     60
 }
 
+fn default_ack_backend() -> String {
+    "memory".to_string()
+}
+
+fn default_ack_redis_prefix() -> String {
+    "ara:ack".to_string()
+}
+
 impl Default for AckSettingsConfig {
     fn default() -> Self {
         Self {
             enabled: false,
             timeout_seconds: default_ack_timeout(),
             cleanup_interval_seconds: default_ack_cleanup_interval(),
+            backend: default_ack_backend(),
+            redis_prefix: default_ack_redis_prefix(),
         }
     }
 }
@@ -196,6 +212,12 @@ pub struct QueueConfig {
     /// Interval for cleanup task in seconds
     #[serde(default = "default_queue_cleanup_interval")]
     pub cleanup_interval_seconds: u64,
+    /// Backend type: "memory" or "redis" (default: "memory")
+    #[serde(default = "default_queue_backend")]
+    pub backend: String,
+    /// Redis key prefix for queue data (default: "ara:queue")
+    #[serde(default = "default_queue_redis_prefix")]
+    pub redis_prefix: String,
 }
 
 fn default_queue_max_size() -> usize {
@@ -208,6 +230,14 @@ fn default_queue_ttl() -> u64 {
 
 fn default_queue_cleanup_interval() -> u64 {
     300 // 5 minutes
+}
+
+fn default_queue_backend() -> String {
+    "memory".to_string()
+}
+
+fn default_queue_redis_prefix() -> String {
+    "ara:queue".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -309,6 +339,8 @@ impl Settings {
             .set_default("queue.max_size_per_user", 100)?
             .set_default("queue.message_ttl_seconds", 3600)?
             .set_default("queue.cleanup_interval_seconds", 300)?
+            .set_default("queue.backend", "memory")?
+            .set_default("queue.redis_prefix", "ara:queue")?
             .set_default("ratelimit.enabled", false)?
             .set_default("ratelimit.http_requests_per_second", 100)?
             .set_default("ratelimit.http_burst_size", 200)?
@@ -323,6 +355,8 @@ impl Settings {
             .set_default("ack.enabled", false)?
             .set_default("ack.timeout_seconds", 30)?
             .set_default("ack.cleanup_interval_seconds", 60)?
+            .set_default("ack.backend", "memory")?
+            .set_default("ack.redis_prefix", "ara:ack")?
             .set_default("otel.enabled", false)?
             .set_default("otel.endpoint", "http://localhost:4317")?
             .set_default("otel.service_name", "ara-notification-service")?
@@ -395,6 +429,8 @@ impl Default for QueueConfig {
             max_size_per_user: default_queue_max_size(),
             message_ttl_seconds: default_queue_ttl(),
             cleanup_interval_seconds: default_queue_cleanup_interval(),
+            backend: default_queue_backend(),
+            redis_prefix: default_queue_redis_prefix(),
         }
     }
 }

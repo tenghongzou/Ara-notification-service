@@ -1,6 +1,15 @@
 //! Redis high availability module
 //!
 //! Provides circuit breaker pattern and exponential backoff for Redis connections.
+//!
+//! # Modules
+//!
+//! - `CircuitBreaker`: Prevents cascading failures when Redis is unavailable
+//! - `ExponentialBackoff`: Provides backoff delays for reconnection attempts
+//! - `RedisHealth`: Tracks Redis connection health status
+//! - `pool`: Connection pool for data persistence operations
+
+pub mod pool;
 
 use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU8, Ordering};
 use std::time::Duration;

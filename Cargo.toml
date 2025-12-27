@@ -29,6 +29,7 @@ dashmap = "6"
 futures = "0.3"
 tokio-stream = "0.1"
 async-stream = "0.3"
+async-trait = "0.1"
 
 # Logging & Tracing
 tracing = "0.1"

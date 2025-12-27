@@ -3,9 +3,12 @@ use std::sync::Arc;
 use crate::auth::JwtValidator;
 use crate::config::Settings;
 use crate::connection_manager::{ConnectionLimits, ConnectionManager};
-use crate::notification::{AckConfig, AckTracker, NotificationDispatcher};
-use crate::queue::{QueueConfig, UserMessageQueue};
+use crate::notification::{
+    create_ack_backend, AckConfig, AckTracker, AckTrackerBackend, NotificationDispatcher,
+};
+use crate::queue::{create_queue_backend, MessageQueueBackend, QueueConfig, UserMessageQueue};
 use crate::ratelimit::RateLimiter;
+use crate::redis::pool::RedisPool;
 use crate::redis::{CircuitBreaker, CircuitBreakerConfig, RedisHealth};
 use crate::template::TemplateStore;
 use crate::tenant::TenantManager;
@@ -20,9 +23,14 @@ pub struct AppState {
     pub rate_limiter: Arc<RateLimiter>,
     pub redis_circuit_breaker: Arc<CircuitBreaker>,
     pub redis_health: Arc<RedisHealth>,
+    pub redis_pool: Option<Arc<RedisPool>>,
     pub ack_tracker: Arc<AckTracker>,
     pub template_store: Arc<TemplateStore>,
     pub tenant_manager: Arc<TenantManager>,
+    /// Backend for persistent queue storage (memory or Redis)
+    pub queue_backend: Arc<dyn MessageQueueBackend>,
+    /// Backend for persistent ACK tracking (memory or Redis)
+    pub ack_backend: Arc<dyn AckTrackerBackend>,
 }
 
 impl AppState {
@@ -37,7 +45,47 @@ impl AppState {
         };
         let connection_manager = Arc::new(ConnectionManager::with_limits(limits));
 
-        // Create message queue from config
+        // Create Redis circuit breaker and health tracker (shared across all Redis operations)
+        let cb_config = CircuitBreakerConfig {
+            failure_threshold: settings.redis.circuit_breaker_failure_threshold,
+            success_threshold: settings.redis.circuit_breaker_success_threshold,
+            reset_timeout_ms: settings.redis.circuit_breaker_reset_timeout_seconds * 1000,
+        };
+        let redis_circuit_breaker = Arc::new(CircuitBreaker::with_config(cb_config));
+        let redis_health = Arc::new(RedisHealth::new());
+
+        // Create Redis pool if Redis backend is needed for queue or ACK tracking
+        let needs_redis = settings.queue.backend == "redis" || settings.ack.backend == "redis";
+        let redis_pool = if needs_redis {
+            match RedisPool::new(
+                settings.redis.clone(),
+                redis_circuit_breaker.clone(),
+                redis_health.clone(),
+            ) {
+                Ok(pool) => {
+                    tracing::info!(url = %settings.redis.url, "Redis pool created for persistence backends");
+                    Some(Arc::new(pool))
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "Failed to create Redis pool, falling back to memory backends"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Create persistent queue backend (memory or Redis)
+        let queue_backend = create_queue_backend(&settings.queue, redis_pool.clone(), None);
+
+        // Create persistent ACK backend (memory or Redis)
+        let ack_backend = create_ack_backend(&settings.ack, redis_pool.clone(), None);
+
+        // Create legacy message queue for backward compatibility
+        // (still used by existing code, will be migrated to queue_backend)
         let queue_config = QueueConfig {
             enabled: settings.queue.enabled,
             max_queue_size_per_user: settings.queue.max_size_per_user,
@@ -46,7 +94,8 @@ impl AppState {
         };
         let message_queue = Arc::new(UserMessageQueue::new(queue_config));
 
-        // Create ACK tracker
+        // Create legacy ACK tracker for backward compatibility
+        // (still used by existing code, will be migrated to ack_backend)
         let ack_config = AckConfig {
             enabled: settings.ack.enabled,
             timeout_seconds: settings.ack.timeout_seconds,
@@ -72,15 +121,6 @@ impl AppState {
             bucket_ttl_seconds: 300, // 5 minutes default
         }));
 
-        // Create Redis circuit breaker
-        let cb_config = CircuitBreakerConfig {
-            failure_threshold: settings.redis.circuit_breaker_failure_threshold,
-            success_threshold: settings.redis.circuit_breaker_success_threshold,
-            reset_timeout_ms: settings.redis.circuit_breaker_reset_timeout_seconds * 1000,
-        };
-        let redis_circuit_breaker = Arc::new(CircuitBreaker::with_config(cb_config));
-        let redis_health = Arc::new(RedisHealth::new());
-
         // Create template store
         let template_store = Arc::new(TemplateStore::new());
 
@@ -96,9 +136,12 @@ impl AppState {
             rate_limiter,
             redis_circuit_breaker,
             redis_health,
+            redis_pool,
             ack_tracker,
             template_store,
             tenant_manager,
+            queue_backend,
+            ack_backend,
         }
     }
 }
