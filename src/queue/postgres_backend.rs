@@ -9,7 +9,7 @@ use chrono::{Duration, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::metrics::{QUEUE_ENQUEUED_TOTAL, QUEUE_EXPIRED_TOTAL};
+use crate::metrics::{QUEUE_DROPPED_TOTAL, QUEUE_ENQUEUED_TOTAL, QUEUE_EXPIRED_TOTAL};
 use crate::notification::NotificationEvent;
 
 use super::backend::{DrainResult, MessageQueueBackend, QueueBackendError, QueueBackendStats, StoredMessage};
@@ -71,35 +71,42 @@ impl MessageQueueBackend for PostgresQueueBackend {
         let event_data = serde_json::to_value(&event)?;
         let id = Uuid::new_v4();
 
-        // Check current queue size and enforce limit
-        let current_size: i64 = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM message_queue WHERE tenant_id = $1 AND user_id = $2"
+        // Atomic enqueue with queue size enforcement using CTE
+        // This prevents race conditions by combining delete + insert in a single query
+        let result: (i64,) = sqlx::query_as(
+            r#"
+            WITH deleted AS (
+                DELETE FROM message_queue
+                WHERE id IN (
+                    SELECT id FROM message_queue
+                    WHERE tenant_id = $1 AND user_id = $2
+                    AND (SELECT COUNT(*) FROM message_queue WHERE tenant_id = $1 AND user_id = $2) >= $3
+                    ORDER BY queued_at ASC
+                    LIMIT 1
+                )
+                RETURNING 1
+            ),
+            inserted AS (
+                INSERT INTO message_queue (id, tenant_id, user_id, event_data, queued_at, expires_at)
+                VALUES ($4, $1, $2, $5, NOW(), $6)
+                RETURNING 1
+            )
+            SELECT COALESCE((SELECT COUNT(*) FROM deleted), 0) as dropped
+            "#
         )
         .bind(&self.tenant_id)
         .bind(user_id)
+        .bind(self.config.max_queue_size_per_user as i64)
+        .bind(id)
+        .bind(&event_data)
+        .bind(expires_at)
         .fetch_one(&self.pool)
         .await
         .map_err(QueueBackendError::Postgres)?;
 
-        // If queue is at max, delete oldest message
-        if current_size >= self.config.max_queue_size_per_user as i64 {
-            sqlx::query(
-                r#"
-                DELETE FROM message_queue
-                WHERE id = (
-                    SELECT id FROM message_queue
-                    WHERE tenant_id = $1 AND user_id = $2
-                    ORDER BY queued_at ASC
-                    LIMIT 1
-                )
-                "#
-            )
-            .bind(&self.tenant_id)
-            .bind(user_id)
-            .execute(&self.pool)
-            .await
-            .map_err(QueueBackendError::Postgres)?;
-
+        let dropped = result.0;
+        if dropped > 0 {
+            QUEUE_DROPPED_TOTAL.inc();
             tracing::debug!(
                 user_id = %user_id,
                 tenant_id = %self.tenant_id,
@@ -107,29 +114,14 @@ impl MessageQueueBackend for PostgresQueueBackend {
             );
         }
 
-        // Insert new message
-        sqlx::query(
-            r#"
-            INSERT INTO message_queue (id, tenant_id, user_id, event_data, queued_at, expires_at)
-            VALUES ($1, $2, $3, $4, NOW(), $5)
-            "#
-        )
-        .bind(id)
-        .bind(&self.tenant_id)
-        .bind(user_id)
-        .bind(&event_data)
-        .bind(expires_at)
-        .execute(&self.pool)
-        .await
-        .map_err(QueueBackendError::Postgres)?;
-
         // Update queue stats
-        let _ = sqlx::query(
-            "SELECT upsert_queue_stats($1, 1, 0, 0)"
-        )
-        .bind(&self.tenant_id)
-        .execute(&self.pool)
-        .await;
+        if let Err(e) = sqlx::query("SELECT upsert_queue_stats($1, 1, 0, 0)")
+            .bind(&self.tenant_id)
+            .execute(&self.pool)
+            .await
+        {
+            tracing::warn!(error = %e, "Failed to update queue stats after enqueue");
+        }
 
         QUEUE_ENQUEUED_TOTAL.inc();
 
@@ -181,13 +173,23 @@ impl MessageQueueBackend for PostgresQueueBackend {
         let messages: Vec<StoredMessage> = rows
             .into_iter()
             .filter_map(|(id, event_data, queued_at, attempts)| {
-                serde_json::from_value(event_data).ok().map(|event| StoredMessage {
-                    id,
-                    event,
-                    queued_at,
-                    attempts: attempts as u32,
-                    stream_id: None,
-                })
+                match serde_json::from_value(event_data) {
+                    Ok(event) => Some(StoredMessage {
+                        id,
+                        event,
+                        queued_at,
+                        attempts: attempts as u32,
+                        stream_id: None,
+                    }),
+                    Err(e) => {
+                        tracing::warn!(
+                            message_id = %id,
+                            error = %e,
+                            "Failed to deserialize queued message, skipping"
+                        );
+                        None
+                    }
+                }
             })
             .collect();
 
@@ -195,14 +197,15 @@ impl MessageQueueBackend for PostgresQueueBackend {
 
         // Update queue stats
         if drained_count > 0 || expired > 0 {
-            let _ = sqlx::query(
-                "SELECT upsert_queue_stats($1, 0, $2, $3)"
-            )
-            .bind(&self.tenant_id)
-            .bind(drained_count as i64)
-            .bind(expired as i64)
-            .execute(&self.pool)
-            .await;
+            if let Err(e) = sqlx::query("SELECT upsert_queue_stats($1, 0, $2, $3)")
+                .bind(&self.tenant_id)
+                .bind(drained_count as i64)
+                .bind(expired as i64)
+                .execute(&self.pool)
+                .await
+            {
+                tracing::warn!(error = %e, "Failed to update queue stats after drain");
+            }
         }
 
         if expired > 0 {
@@ -244,13 +247,23 @@ impl MessageQueueBackend for PostgresQueueBackend {
         let messages = rows
             .into_iter()
             .filter_map(|(id, event_data, queued_at, attempts)| {
-                serde_json::from_value(event_data).ok().map(|event| StoredMessage {
-                    id,
-                    event,
-                    queued_at,
-                    attempts: attempts as u32,
-                    stream_id: None,
-                })
+                match serde_json::from_value(event_data) {
+                    Ok(event) => Some(StoredMessage {
+                        id,
+                        event,
+                        queued_at,
+                        attempts: attempts as u32,
+                        stream_id: None,
+                    }),
+                    Err(e) => {
+                        tracing::warn!(
+                            message_id = %id,
+                            error = %e,
+                            "Failed to deserialize queued message in peek, skipping"
+                        );
+                        None
+                    }
+                }
             })
             .collect();
 
@@ -279,9 +292,11 @@ impl MessageQueueBackend for PostgresQueueBackend {
             return Ok(0);
         }
 
+        // Delete expired messages (tenant-scoped for proper isolation)
         let result = sqlx::query(
-            "DELETE FROM message_queue WHERE expires_at <= NOW()"
+            "DELETE FROM message_queue WHERE tenant_id = $1 AND expires_at <= NOW()"
         )
+        .bind(&self.tenant_id)
         .execute(&self.pool)
         .await
         .map_err(QueueBackendError::Postgres)?;
@@ -291,6 +306,7 @@ impl MessageQueueBackend for PostgresQueueBackend {
         if count > 0 {
             QUEUE_EXPIRED_TOTAL.inc_by(count as u64);
             tracing::debug!(
+                tenant_id = %self.tenant_id,
                 expired = count,
                 "Cleaned up expired messages from PostgreSQL"
             );

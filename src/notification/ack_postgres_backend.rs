@@ -98,10 +98,13 @@ impl AckTrackerBackend for PostgresAckBackend {
         }
 
         // Update stats
-        let _ = sqlx::query("SELECT upsert_ack_stats($1, 1, 0, 0, 0)")
+        if let Err(e) = sqlx::query("SELECT upsert_ack_stats($1, 1, 0, 0, 0)")
             .bind(&self.tenant_id)
             .execute(&self.pool)
-            .await;
+            .await
+        {
+            tracing::warn!(error = %e, "Failed to update ACK stats after track");
+        }
 
         ACK_TRACKED_TOTAL.inc();
 
@@ -118,16 +121,17 @@ impl AckTrackerBackend for PostgresAckBackend {
             return false;
         }
 
-        // Get pending ACK info and delete in one query
+        // Get pending ACK info and delete in one query (with tenant isolation)
         let pending: Option<(chrono::DateTime<Utc>, String)> = sqlx::query_as(
             r#"
             DELETE FROM pending_acks
-            WHERE notification_id = $1 AND user_id = $2
+            WHERE notification_id = $1 AND user_id = $2 AND tenant_id = $3
             RETURNING sent_at, user_id
             "#
         )
         .bind(notification_id)
         .bind(user_id)
+        .bind(&self.tenant_id)
         .fetch_optional(&self.pool)
         .await
         .ok()
@@ -142,11 +146,14 @@ impl AckTrackerBackend for PostgresAckBackend {
                     .max(0) as u64;
 
                 // Update stats
-                let _ = sqlx::query("SELECT upsert_ack_stats($1, 0, 1, 0, $2)")
+                if let Err(e) = sqlx::query("SELECT upsert_ack_stats($1, 0, 1, 0, $2)")
                     .bind(&self.tenant_id)
                     .bind(latency_ms as i64)
                     .execute(&self.pool)
-                    .await;
+                    .await
+                {
+                    tracing::warn!(error = %e, "Failed to update ACK stats after acknowledge");
+                }
 
                 ACK_RECEIVED_TOTAL.inc();
                 ACK_LATENCY.observe(latency_ms as f64 / 1000.0);
@@ -176,10 +183,11 @@ impl AckTrackerBackend for PostgresAckBackend {
             r#"
             SELECT notification_id, user_id, connection_id, sent_at
             FROM pending_acks
-            WHERE notification_id = $1
+            WHERE notification_id = $1 AND tenant_id = $2
             "#
         )
         .bind(notification_id)
+        .bind(&self.tenant_id)
         .fetch_optional(&self.pool)
         .await
         .map_err(AckBackendError::Postgres)?;
@@ -199,10 +207,11 @@ impl AckTrackerBackend for PostgresAckBackend {
             return 0;
         }
 
-        // Delete expired pending ACKs and count
+        // Delete expired pending ACKs and count (tenant-scoped)
         let result = sqlx::query(
-            "DELETE FROM pending_acks WHERE expires_at <= NOW()"
+            "DELETE FROM pending_acks WHERE tenant_id = $1 AND expires_at <= NOW()"
         )
+        .bind(&self.tenant_id)
         .execute(&self.pool)
         .await;
 
@@ -219,11 +228,14 @@ impl AckTrackerBackend for PostgresAckBackend {
 
         if count > 0 {
             // Update stats
-            let _ = sqlx::query("SELECT upsert_ack_stats($1, 0, 0, $2, 0)")
+            if let Err(e) = sqlx::query("SELECT upsert_ack_stats($1, 0, 0, $2, 0)")
                 .bind(&self.tenant_id)
                 .bind(count as i64)
                 .execute(&self.pool)
-                .await;
+                .await
+            {
+                tracing::warn!(error = %e, "Failed to update ACK stats after cleanup");
+            }
 
             ACK_EXPIRED_TOTAL.inc_by(count as u64);
 
@@ -237,13 +249,12 @@ impl AckTrackerBackend for PostgresAckBackend {
     }
 
     async fn pending_count(&self) -> usize {
-        let count: i64 = sqlx::query_scalar(
+        let count: i64 = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM pending_acks WHERE tenant_id = $1"
         )
         .bind(&self.tenant_id)
         .fetch_one(&self.pool)
         .await
-        .unwrap_or(Some(0))
         .unwrap_or(0);
 
         count as usize
