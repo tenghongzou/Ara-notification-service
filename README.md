@@ -1,23 +1,44 @@
 # Ara Notification Service
 
-高效能即時通知服務，使用 Rust 建構，提供 WebSocket 即時推播功能。
+高效能即時通知服務，使用 Rust 建構，提供 WebSocket/SSE 即時推播功能。
+
+[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](CHANGELOG.md)
+[![Rust](https://img.shields.io/badge/rust-1.75+-orange.svg)](https://www.rust-lang.org/)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 ## 特性
 
-- **WebSocket 即時推播** - 低延遲、高效能的即時通訊
-- **JWT 認證** - 安全的身份驗證機制，支援角色權限
-- **多種訊息模式** - 點對點、廣播、頻道訂閱
-- **雙觸發機制** - HTTP REST API 與 Redis Pub/Sub
+### 核心功能
+- **WebSocket 即時推播** - 低延遲、高效能的雙向即時通訊
+- **SSE 備援** - Server-Sent Events 單向推播，防火牆友好
+- **JWT 認證** - 安全的身份驗證機制，支援角色權限與多租戶
+- **多種訊息模式** - 點對點、多使用者、廣播、頻道訂閱
+- **雙觸發機制** - HTTP REST API 與 Redis Pub/Sub 並行支援
 - **多裝置支援** - 同一使用者可在多裝置同時接收通知
+
+### 進階功能
 - **離線訊息佇列** - 離線使用者重連時自動重播訊息
 - **通知模板系統** - 可重用模板與 `{{variable}}` 變數替換
+- **批次發送 API** - 單次請求發送多達 100 筆通知
+- **客戶端 ACK** - 通知送達確認機制與統計
 - **請求限流** - Token Bucket 演算法保護系統資源
-- **心跳檢測** - 自動偵測並清理閒置連線
+
+### 多租戶支援
+- **租戶隔離** - JWT `tenant_id` 聲明自動隔離頻道
+- **獨立統計** - 每租戶連線數、訊息數統計
+- **彈性限制** - 可針對特定租戶設定連線上限
+
+### 可觀測性
 - **Prometheus 監控** - 完整的指標匯出 (`/metrics`)
 - **OpenTelemetry 追蹤** - 分散式追蹤整合 (Jaeger, Tempo, Zipkin)
+- **Redis 高可用** - 熔斷器模式與指數退避重連
 - **K6 負載測試** - 完整測試套件含 7 種負載場景
-- **完全無狀態** - 純記憶體運作，適合水平擴展
-- **安全防護** - API Key 認證、連線限制、CORS 控制、錯誤遮蔽
+
+### 安全防護
+- **API Key 認證** - HTTP API 端點保護
+- **連線限制** - 總連線數與每使用者連線數限制
+- **CORS 控制** - 可配置的跨域請求策略
+- **錯誤遮蔽** - 生產模式隱藏內部錯誤詳情
 
 ## 系統架構
 
@@ -48,13 +69,13 @@
 │            ▼          ▼             ▼                        │
 │  ┌───────────────────────────────────────────────────────┐  │
 │  │              ConnectionManager (DashMap)               │  │
-│  │  connections │ user_index │ channel_index              │  │
+│  │  connections │ user_index │ channel_index │ tenant    │  │
 │  └───────────────────────────────────────────────────────┘  │
 └─────────────────────────────┬───────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                    WebSocket 客戶端                          │
+│                    WebSocket / SSE 客戶端                    │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐    │
 │  │ 前端 App │  │ 管理後台 │  │ 行動裝置 │  │ 其他客戶 │    │
 │  └──────────┘  └──────────┘  └──────────┘  └──────────┘    │
@@ -84,7 +105,7 @@ cargo build
 # 執行服務
 cargo run
 
-# 執行測試
+# 執行測試 (121 個測試)
 cargo test
 ```
 
@@ -122,16 +143,14 @@ docker-compose up -d notification
 
 ## API 概覽
 
-### WebSocket 連線
+### 即時連線
 
-```
+```bash
+# WebSocket (雙向)
 ws://localhost:8081/ws?token=<JWT>
-```
 
-或使用 Authorization Header：
-```
-ws://localhost:8081/ws
-Authorization: Bearer <JWT>
+# SSE (單向，防火牆友好)
+curl -N http://localhost:8081/sse?token=<JWT>
 ```
 
 ### HTTP REST API
@@ -145,20 +164,29 @@ curl -X POST http://localhost:8081/api/v1/notifications/send \
   -d '{"target_user_id": "user123", "event_type": "test", "payload": {}}'
 ```
 
-| 方法 | 路徑 | 認證 | 說明 |
-|------|------|------|------|
-| POST | `/api/v1/notifications/send` | API Key | 點對點通知 |
-| POST | `/api/v1/notifications/send-to-users` | API Key | 多使用者通知 |
-| POST | `/api/v1/notifications/broadcast` | API Key | 廣播通知 |
-| POST | `/api/v1/notifications/channel` | API Key | 頻道通知 |
-| POST | `/api/v1/notifications/channels` | API Key | 多頻道通知 |
-| POST | `/api/v1/notifications/batch` | API Key | 批次發送（最多 100 筆） |
-| GET | `/api/v1/channels` | API Key | 頻道列表與訂閱數 |
-| GET | `/api/v1/channels/{name}` | API Key | 頻道詳情 |
-| GET | `/api/v1/users/{user_id}/subscriptions` | API Key | 使用者訂閱列表 |
-| GET | `/stats` | API Key | 連線統計 |
-| GET | `/health` | 無 | 健康檢查 |
-| WS | `/ws` | JWT | WebSocket 連線 |
+| 方法 | 路徑 | 說明 |
+|------|------|------|
+| POST | `/api/v1/notifications/send` | 點對點通知 |
+| POST | `/api/v1/notifications/send-to-users` | 多使用者通知 |
+| POST | `/api/v1/notifications/broadcast` | 廣播通知 |
+| POST | `/api/v1/notifications/channel` | 頻道通知 |
+| POST | `/api/v1/notifications/channels` | 多頻道通知 |
+| POST | `/api/v1/notifications/batch` | 批次發送（最多 100 筆） |
+| GET | `/api/v1/channels` | 頻道列表與訂閱數 |
+| GET | `/api/v1/channels/{name}` | 頻道詳情 |
+| GET | `/api/v1/users/{user_id}/subscriptions` | 使用者訂閱列表 |
+| POST | `/api/v1/templates` | 建立通知模板 |
+| GET | `/api/v1/templates` | 模板列表 |
+| GET | `/api/v1/templates/{id}` | 模板詳情 |
+| PUT | `/api/v1/templates/{id}` | 更新模板 |
+| DELETE | `/api/v1/templates/{id}` | 刪除模板 |
+| GET | `/api/v1/tenants` | 租戶列表 |
+| GET | `/api/v1/tenants/{id}` | 租戶統計 |
+| GET | `/health` | 健康檢查 |
+| GET | `/stats` | 連線統計 |
+| GET | `/metrics` | Prometheus 指標 |
+| WS | `/ws` | WebSocket 連線 |
+| GET | `/sse` | SSE 連線 |
 
 ### Redis Pub/Sub 頻道
 
@@ -172,7 +200,7 @@ notification:channel:{name}     # 頻道
 
 ## 配置
 
-### 環境變數
+### 核心環境變數
 
 | 變數 | 說明 | 預設值 |
 |------|------|--------|
@@ -182,6 +210,9 @@ notification:channel:{name}     # 頻道
 | `JWT_ISSUER` | JWT 簽發者驗證 | (選填) |
 | `JWT_AUDIENCE` | JWT 受眾驗證 | (選填) |
 | `REDIS_URL` | Redis 連線 URL | `redis://localhost:6379` |
+| `API_KEY` | HTTP API 認證金鑰 | (選填) |
+| `CORS_ORIGINS` | 允許的來源 (逗號分隔) | (空=允許全部) |
+| `RUN_MODE` | 執行模式 | `development` |
 | `RUST_LOG` | 日誌等級 | `info` |
 
 ### WebSocket 配置
@@ -191,40 +222,18 @@ notification:channel:{name}     # 頻道
 | `WEBSOCKET_HEARTBEAT_INTERVAL` | 心跳間隔 (秒) | `30` |
 | `WEBSOCKET_CONNECTION_TIMEOUT` | 連線超時 (秒) | `120` |
 | `WEBSOCKET_CLEANUP_INTERVAL` | 清理任務間隔 (秒) | `60` |
-| `WEBSOCKET_MAX_CONNECTIONS` | 最大總連線數 (0=無限) | `10000` |
-| `WEBSOCKET_MAX_CONNECTIONS_PER_USER` | 每使用者最大連線數 (0=無限) | `5` |
-| `WEBSOCKET_MAX_SUBSCRIPTIONS_PER_CONNECTION` | 每連線最大頻道訂閱數 (0=無限) | `50` |
+| `WEBSOCKET_MAX_CONNECTIONS` | 最大總連線數 | `10000` |
+| `WEBSOCKET_MAX_CONNECTIONS_PER_USER` | 每使用者最大連線數 | `5` |
+| `WEBSOCKET_MAX_SUBSCRIPTIONS_PER_CONNECTION` | 每連線最大頻道訂閱數 | `50` |
 
-### 安全配置
-
-| 變數 | 說明 | 預設值 |
-|------|------|--------|
-| `RUN_MODE` | 執行模式 (`development` / `production`) | `development` |
-| `API_KEY` | HTTP API 認證金鑰 | (選填，建議生產環境必填) |
-| `CORS_ORIGINS` | 允許的來源 (逗號分隔) | (空=允許全部) |
-
-#### 安全機制說明
-
-| 機制 | 說明 |
-|------|------|
-| **API Key 認證** | HTTP API 端點需要 `X-API-Key` Header，開發模式若未設定則跳過驗證 |
-| **連線限制** | 限制總連線數與每使用者連線數，防止資源耗盡攻擊 |
-| **頻道訂閱限制** | 限制每連線可訂閱的頻道數量 |
-| **CORS 控制** | 生產環境限制允許的來源，開發模式警告並允許全部 |
-| **請求大小限制** | API 請求 body 限制為 64KB |
-| **錯誤遮蔽** | 生產模式下隱藏內部錯誤詳情，僅回傳通用錯誤訊息 |
-| **JWT 驗證** | WebSocket 連線需要有效的 JWT Token |
-
-### 訊息佇列配置
+### 離線訊息佇列
 
 | 變數 | 說明 | 預設值 |
 |------|------|--------|
 | `QUEUE_ENABLED` | 是否啟用離線訊息佇列 | `false` |
 | `QUEUE_MAX_SIZE_PER_USER` | 每使用者最大佇列訊息數 | `100` |
-| `QUEUE_MESSAGE_TTL_SECONDS` | 訊息存活時間（秒） | `3600` (1小時) |
-| `QUEUE_CLEANUP_INTERVAL_SECONDS` | 清理過期訊息間隔（秒） | `300` (5分鐘) |
-
-**離線訊息佇列說明**：當使用者離線時，發送給該使用者的通知會被暫存在記憶體佇列中。使用者重新連線時，所有未過期的訊息會按順序自動重播。佇列採用 FIFO 策略，當佇列滿時會丟棄最舊的訊息。
+| `QUEUE_MESSAGE_TTL_SECONDS` | 訊息存活時間（秒） | `3600` |
+| `QUEUE_CLEANUP_INTERVAL_SECONDS` | 清理過期訊息間隔（秒） | `300` |
 
 ### 限流配置
 
@@ -234,21 +243,32 @@ notification:channel:{name}     # 頻道
 | `RATELIMIT_HTTP_REQUESTS_PER_SECOND` | HTTP 請求限制（每秒） | `100` |
 | `RATELIMIT_HTTP_BURST_SIZE` | HTTP 請求突發容量 | `200` |
 | `RATELIMIT_WS_CONNECTIONS_PER_MINUTE` | WebSocket 連線限制（每分鐘/每 IP） | `10` |
-| `RATELIMIT_WS_MESSAGES_PER_SECOND` | WebSocket 訊息限制（每秒/每連線） | `50` |
 
-**限流機制說明**：採用 Token Bucket 演算法，支援請求突發的同時保護系統資源。限流適用於 HTTP API（按 API Key 或 IP）與 WebSocket 連線（按 IP）。超過限制時回傳 `429 Too Many Requests` 並包含 `Retry-After` 標頭。
-
-### Redis 高可用配置
+### ACK 確認追蹤
 
 | 變數 | 說明 | 預設值 |
 |------|------|--------|
-| `REDIS_CIRCUIT_BREAKER_FAILURE_THRESHOLD` | 熔斷器開啟所需的連續失敗次數 | `5` |
-| `REDIS_CIRCUIT_BREAKER_SUCCESS_THRESHOLD` | 熔斷器關閉所需的成功次數（半開狀態） | `2` |
-| `REDIS_CIRCUIT_BREAKER_RESET_TIMEOUT_SECONDS` | 熔斷器重置超時（秒） | `30` |
-| `REDIS_BACKOFF_INITIAL_DELAY_MS` | 指數退避初始延遲（毫秒） | `100` |
-| `REDIS_BACKOFF_MAX_DELAY_MS` | 指數退避最大延遲（毫秒） | `30000` |
+| `ACK_ENABLED` | 是否啟用 ACK 追蹤 | `false` |
+| `ACK_TIMEOUT_SECONDS` | ACK 超時時間（秒） | `30` |
+| `ACK_CLEANUP_INTERVAL_SECONDS` | 清理過期 ACK 間隔（秒） | `60` |
 
-**Redis 高可用說明**：當 Redis 連線失敗時，系統會使用熔斷器模式保護資源。連續失敗達到閾值後，熔斷器開啟並停止嘗試連線。等待重置超時後，進入半開狀態嘗試重新連線。重連採用指數退避策略（含 10% 抖動），避免雪崩效應。健康狀態可透過 `/health` 和 `/stats` 端點監控。
+### 多租戶配置
+
+| 變數 | 說明 | 預設值 |
+|------|------|--------|
+| `TENANT_ENABLED` | 是否啟用多租戶模式 | `false` |
+| `TENANT_DEFAULT_MAX_CONNECTIONS` | 預設租戶最大連線數 | `1000` |
+| `TENANT_DEFAULT_MAX_CONNECTIONS_PER_USER` | 預設租戶每用戶連線數 | `5` |
+
+### Redis 高可用
+
+| 變數 | 說明 | 預設值 |
+|------|------|--------|
+| `REDIS_CIRCUIT_BREAKER_FAILURE_THRESHOLD` | 熔斷器開啟閾值 | `5` |
+| `REDIS_CIRCUIT_BREAKER_SUCCESS_THRESHOLD` | 熔斷器關閉閾值 | `2` |
+| `REDIS_CIRCUIT_BREAKER_RESET_TIMEOUT_SECONDS` | 熔斷器重置超時 | `30` |
+| `REDIS_BACKOFF_INITIAL_DELAY_MS` | 退避初始延遲 | `100` |
+| `REDIS_BACKOFF_MAX_DELAY_MS` | 退避最大延遲 | `30000` |
 
 ### OpenTelemetry 配置
 
@@ -258,8 +278,6 @@ notification:channel:{name}     # 頻道
 | `OTEL_ENDPOINT` | OTLP gRPC 端點 | `http://localhost:4317` |
 | `OTEL_SERVICE_NAME` | 服務名稱 | `ara-notification-service` |
 | `OTEL_SAMPLING_RATIO` | 取樣比率 (0.0-1.0) | `1.0` |
-
-**OpenTelemetry 說明**：啟用後，服務會將追蹤資料透過 OTLP gRPC 協定匯出到指定端點（如 Jaeger、Tempo、Zipkin）。追蹤範圍涵蓋 HTTP 請求、WebSocket 連線與訊息處理、通知派發等關鍵路徑。生產環境建議調整取樣比率以控制資料量。
 
 ## 整合範例
 
@@ -280,6 +298,24 @@ $this->httpClient->request('POST', 'http://notification:8081/api/v1/notification
 ]);
 ```
 
+### Symfony (使用模板)
+
+```php
+$this->httpClient->request('POST', 'http://notification:8081/api/v1/notifications/send', [
+    'headers' => [
+        'X-API-Key' => $_ENV['NOTIFICATION_API_KEY'],
+    ],
+    'json' => [
+        'target_user_id' => $userId,
+        'template_id' => 'order-shipped',
+        'variables' => [
+            'order_id' => $orderId,
+            'tracking_number' => $trackingNumber,
+        ],
+    ],
+]);
+```
+
 ### Symfony (Redis)
 
 ```php
@@ -294,7 +330,7 @@ $redis->publish('notification:user:' . $userId, json_encode([
 ]));
 ```
 
-### JavaScript Client
+### JavaScript Client (WebSocket)
 
 ```javascript
 const ws = new WebSocket('ws://localhost:8081/ws?token=' + jwtToken);
@@ -311,7 +347,33 @@ ws.onmessage = (event) => {
     const msg = JSON.parse(event.data);
     if (msg.type === 'notification') {
         console.log('收到通知:', msg.event_type, msg.payload);
+        // 發送 ACK 確認
+        ws.send(JSON.stringify({
+            type: 'Ack',
+            payload: { notification_id: msg.id }
+        }));
     }
+};
+```
+
+### JavaScript Client (SSE)
+
+```javascript
+const token = 'your-jwt-token';
+const eventSource = new EventSource(`/sse?token=${token}`);
+
+eventSource.addEventListener('connected', (e) => {
+    console.log('Connected:', JSON.parse(e.data).connection_id);
+});
+
+eventSource.addEventListener('notification', (e) => {
+    const notification = JSON.parse(e.data);
+    console.log('Received:', notification.event_type, notification.payload);
+});
+
+eventSource.onerror = (e) => {
+    console.error('SSE error:', e);
+    eventSource.close();
 };
 ```
 
@@ -322,29 +384,48 @@ src/
 ├── main.rs                     # 進入點、服務啟動
 ├── lib.rs                      # 模組匯出
 ├── config/                     # 配置模組
-│   └── settings.rs             # Settings, JwtConfig, RedisConfig, WebSocketConfig
+│   └── settings.rs             # Settings 結構與載入
 ├── server/                     # 伺服器建構
 │   ├── app.rs                  # Axum 路由與中介層
+│   ├── middleware.rs           # API Key 認證、限流中介層
 │   └── state.rs                # AppState 共享狀態
 ├── auth/                       # JWT 認證
 │   ├── jwt.rs                  # JwtValidator
-│   └── claims.rs               # Claims 結構
+│   └── claims.rs               # Claims 結構 (含 tenant_id)
 ├── websocket/                  # WebSocket 處理
 │   ├── handler.rs              # 連線處理、訊息路由
 │   └── message.rs              # ClientMessage, ServerMessage
+├── sse/                        # SSE 處理
+│   ├── mod.rs                  # 模組匯出
+│   └── handler.rs              # SSE 連線處理
 ├── notification/               # 通知核心邏輯
-│   ├── types.rs                # NotificationEvent, Priority, Audience, NotificationTarget
-│   └── dispatcher.rs           # NotificationDispatcher, DeliveryResult
+│   ├── types.rs                # NotificationEvent, Priority, Audience
+│   ├── dispatcher.rs           # NotificationDispatcher
+│   └── ack.rs                  # AckTracker 確認追蹤
 ├── connection_manager/         # 連線管理
-│   └── registry.rs             # ConnectionManager, ConnectionHandle
+│   └── registry.rs             # ConnectionManager 三索引設計
+├── template/                   # 通知模板
+│   └── mod.rs                  # TemplateStore, 變數替換
+├── tenant/                     # 多租戶支援
+│   └── mod.rs                  # TenantManager, TenantContext
+├── queue/                      # 離線訊息佇列
+│   └── mod.rs                  # UserMessageQueue
+├── ratelimit/                  # 請求限流
+│   └── mod.rs                  # RateLimiter (Token Bucket)
+├── redis/                      # Redis 高可用
+│   └── mod.rs                  # CircuitBreaker, RedisHealth
 ├── triggers/                   # 觸發器
 │   ├── http.rs                 # HTTP REST API handlers
 │   └── redis.rs                # RedisSubscriber
 ├── tasks/                      # 背景任務
-│   └── heartbeat.rs            # HeartbeatTask (心跳 + 清理)
+│   └── heartbeat.rs            # HeartbeatTask
 ├── api/                        # REST API
 │   ├── routes.rs               # 路由定義
-│   └── handlers.rs             # health, stats handlers
+│   └── handlers.rs             # health, stats, metrics handlers
+├── metrics/                    # Prometheus 指標
+│   └── mod.rs                  # 指標定義與匯出
+├── telemetry/                  # OpenTelemetry
+│   └── mod.rs                  # 追蹤初始化
 └── error/                      # 錯誤處理
     └── mod.rs                  # AppError 定義
 ```
@@ -354,8 +435,8 @@ src/
 - [API 規格](docs/API.md) - 完整的 API 文件
 - [系統架構](docs/ARCHITECTURE.md) - 詳細架構說明
 - [開發路線圖](docs/ROADMAP.md) - 進階功能開發計畫
-- [貢獻指南](CONTRIBUTING.md) - 貢獻程式碼指引
 - [變更記錄](CHANGELOG.md) - 版本變更歷史
+- [貢獻指南](CONTRIBUTING.md) - 貢獻程式碼指引
 
 ## 開發
 

@@ -1024,7 +1024,7 @@ curl -X GET http://localhost:8081/api/v1/tenants/acme-corp \
 ```json
 {
   "status": "healthy",
-  "version": "0.1.0"
+  "version": "1.0.0"
 }
 ```
 
