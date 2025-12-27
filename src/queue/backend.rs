@@ -27,6 +27,10 @@ pub enum QueueBackendError {
     #[error("Redis error: {0}")]
     Redis(#[from] redis::RedisError),
 
+    /// PostgreSQL operation failed
+    #[error("PostgreSQL error: {0}")]
+    Postgres(#[from] sqlx::Error),
+
     /// Serialization error
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),

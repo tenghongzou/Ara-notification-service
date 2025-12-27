@@ -23,7 +23,7 @@ async fn main() -> Result<()> {
     tracing::info!("Configuration loaded");
 
     // Create application state
-    let state = AppState::new(settings.clone());
+    let state = AppState::new(settings.clone()).await;
     tracing::info!("Application state initialized");
 
     // Create Redis subscriber with circuit breaker and health from state

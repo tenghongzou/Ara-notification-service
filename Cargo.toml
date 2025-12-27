@@ -22,6 +22,9 @@ jsonwebtoken = "9"
 # Redis
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 
+# PostgreSQL
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono", "json"] }
+
 # Concurrent data structures
 dashmap = "6"
 

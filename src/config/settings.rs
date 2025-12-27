@@ -22,6 +22,8 @@ pub struct Settings {
     pub otel: OtelConfig,
     #[serde(default)]
     pub tenant: TenantConfig,
+    #[serde(default)]
+    pub database: DatabaseConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -305,6 +307,49 @@ pub struct ApiConfig {
     pub key: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct DatabaseConfig {
+    /// PostgreSQL connection URL
+    #[serde(default = "default_database_url")]
+    pub url: String,
+    /// Maximum number of connections in the pool
+    #[serde(default = "default_pool_size")]
+    pub pool_size: u32,
+    /// Connection timeout in seconds
+    #[serde(default = "default_connect_timeout")]
+    pub connect_timeout_seconds: u32,
+    /// Idle connection timeout in seconds
+    #[serde(default = "default_idle_timeout")]
+    pub idle_timeout_seconds: u32,
+}
+
+fn default_database_url() -> String {
+    "postgres://localhost:5432/ara_notification".to_string()
+}
+
+fn default_pool_size() -> u32 {
+    10
+}
+
+fn default_connect_timeout() -> u32 {
+    30
+}
+
+fn default_idle_timeout() -> u32 {
+    600 // 10 minutes
+}
+
+impl Default for DatabaseConfig {
+    fn default() -> Self {
+        Self {
+            url: default_database_url(),
+            pool_size: default_pool_size(),
+            connect_timeout_seconds: default_connect_timeout(),
+            idle_timeout_seconds: default_idle_timeout(),
+        }
+    }
+}
+
 fn default_host() -> String {
     "0.0.0.0".to_string()
 }
@@ -365,6 +410,10 @@ impl Settings {
             .set_default("tenant.default_limits.max_connections", 1000)?
             .set_default("tenant.default_limits.max_connections_per_user", 5)?
             .set_default("tenant.default_limits.max_subscriptions_per_connection", 50)?
+            .set_default("database.url", "postgres://localhost:5432/ara_notification")?
+            .set_default("database.pool_size", 10)?
+            .set_default("database.connect_timeout_seconds", 30)?
+            .set_default("database.idle_timeout_seconds", 600)?
             // Load config file if exists
             .add_source(File::with_name("config/default").required(false))
             .add_source(File::with_name(&format!("config/{}", run_mode)).required(false))

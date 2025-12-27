@@ -6,6 +6,7 @@ use crate::connection_manager::{ConnectionLimits, ConnectionManager};
 use crate::notification::{
     create_ack_backend, AckConfig, AckTracker, AckTrackerBackend, NotificationDispatcher,
 };
+use crate::postgres::PostgresPool;
 use crate::queue::{create_queue_backend, MessageQueueBackend, QueueConfig, UserMessageQueue};
 use crate::ratelimit::RateLimiter;
 use crate::redis::pool::RedisPool;
@@ -24,17 +25,18 @@ pub struct AppState {
     pub redis_circuit_breaker: Arc<CircuitBreaker>,
     pub redis_health: Arc<RedisHealth>,
     pub redis_pool: Option<Arc<RedisPool>>,
+    pub postgres_pool: Option<Arc<PostgresPool>>,
     pub ack_tracker: Arc<AckTracker>,
     pub template_store: Arc<TemplateStore>,
     pub tenant_manager: Arc<TenantManager>,
-    /// Backend for persistent queue storage (memory or Redis)
+    /// Backend for persistent queue storage (memory, Redis, or PostgreSQL)
     pub queue_backend: Arc<dyn MessageQueueBackend>,
-    /// Backend for persistent ACK tracking (memory or Redis)
+    /// Backend for persistent ACK tracking (memory, Redis, or PostgreSQL)
     pub ack_backend: Arc<dyn AckTrackerBackend>,
 }
 
 impl AppState {
-    pub fn new(settings: Settings) -> Self {
+    pub async fn new(settings: Settings) -> Self {
         let jwt_validator = Arc::new(JwtValidator::new(&settings.jwt));
 
         // Create connection manager with limits from config
@@ -78,11 +80,31 @@ impl AppState {
             None
         };
 
-        // Create persistent queue backend (memory or Redis)
-        let queue_backend = create_queue_backend(&settings.queue, redis_pool.clone(), None);
+        // Create PostgreSQL pool if PostgreSQL backend is needed for queue or ACK tracking
+        let needs_postgres = settings.queue.backend == "postgres" || settings.ack.backend == "postgres";
+        let postgres_pool = if needs_postgres && !settings.database.url.is_empty() {
+            match PostgresPool::new(&settings.database, redis_circuit_breaker.clone()).await {
+                Ok(pool) => {
+                    tracing::info!("PostgreSQL pool created for persistence backends");
+                    Some(Arc::new(pool))
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "Failed to create PostgreSQL pool, falling back to memory backends"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
-        // Create persistent ACK backend (memory or Redis)
-        let ack_backend = create_ack_backend(&settings.ack, redis_pool.clone(), None);
+        // Create persistent queue backend (memory, Redis, or PostgreSQL)
+        let queue_backend = create_queue_backend(&settings.queue, redis_pool.clone(), postgres_pool.clone(), None);
+
+        // Create persistent ACK backend (memory, Redis, or PostgreSQL)
+        let ack_backend = create_ack_backend(&settings.ack, redis_pool.clone(), postgres_pool.clone(), None);
 
         // Create legacy message queue for backward compatibility
         // (still used by existing code, will be migrated to queue_backend)
@@ -137,6 +159,7 @@ impl AppState {
             redis_circuit_breaker,
             redis_health,
             redis_pool,
+            postgres_pool,
             ack_tracker,
             template_store,
             tenant_manager,

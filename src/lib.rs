@@ -5,6 +5,7 @@ pub mod connection_manager;
 pub mod error;
 pub mod metrics;
 pub mod notification;
+pub mod postgres;
 pub mod queue;
 pub mod ratelimit;
 pub mod redis;
