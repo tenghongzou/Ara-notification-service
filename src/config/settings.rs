@@ -22,9 +22,12 @@ where
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Settings {
+    #[serde(default)]
     pub server: ServerConfig,
     pub jwt: JwtConfig,
+    #[serde(default)]
     pub redis: RedisConfig,
+    #[serde(default)]
     pub api: ApiConfig,
     #[serde(default)]
     pub websocket: WebSocketConfig,
@@ -337,6 +340,12 @@ fn default_backoff_max_delay() -> u64 {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ApiConfig {
     pub key: Option<String>,
+}
+
+impl Default for ApiConfig {
+    fn default() -> Self {
+        Self { key: None }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
