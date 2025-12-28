@@ -26,6 +26,9 @@ RUN cargo build --release && \
 # Copy actual source code
 COPY src ./src
 
+# Debug: check what was copied
+RUN echo "=== lib.rs content ===" && cat src/lib.rs && echo "=== src directory ===" && ls -la src/
+
 # Build the actual application
 RUN cargo build --release
 
