@@ -19,7 +19,9 @@ RUN mkdir src && \
 
 # Build dependencies only
 RUN cargo build --release && \
-    rm -rf src target/release/deps/ara_notification_service*
+    rm -rf src && \
+    rm -rf target/release/deps/ara_notification_service* && \
+    rm -rf target/release/.fingerprint/ara_notification_service*
 
 # Copy actual source code
 COPY src ./src
