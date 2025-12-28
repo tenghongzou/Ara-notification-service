@@ -1,9 +1,24 @@
 use config::{Config, ConfigError, Environment, File};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use std::env;
 
 use crate::cluster::ClusterConfig;
 use crate::tenant::TenantConfig;
+
+/// Deserialize a comma-separated string into a Vec<String>
+fn deserialize_comma_separated<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s: Option<String> = Option::deserialize(deserializer)?;
+    Ok(s.map(|s| {
+        s.split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    })
+    .unwrap_or_default())
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Settings {
@@ -265,7 +280,7 @@ pub struct ServerConfig {
     pub host: String,
     #[serde(default = "default_port")]
     pub port: u16,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_comma_separated")]
     pub cors_origins: Vec<String>,
 }
 
@@ -280,7 +295,7 @@ pub struct JwtConfig {
 pub struct RedisConfig {
     #[serde(default = "default_redis_url")]
     pub url: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_comma_separated")]
     pub channels: Vec<String>,
     /// Circuit breaker failure threshold (consecutive failures before opening)
     #[serde(default = "default_circuit_breaker_failure_threshold")]
@@ -444,8 +459,7 @@ impl Settings {
             .add_source(
                 Environment::default()
                     .separator("_")
-                    .try_parsing(true)
-                    .list_separator(","),
+                    .try_parsing(true),
             );
 
         builder.build()?.try_deserialize()
