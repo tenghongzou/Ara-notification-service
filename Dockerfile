@@ -12,23 +12,13 @@ WORKDIR /app
 # Copy manifests first for layer caching
 COPY Cargo.toml Cargo.lock ./
 
-# Create dummy source for dependency caching
-RUN mkdir src && \
-    echo 'fn main() { println!("dummy"); }' > src/main.rs && \
-    echo 'pub fn dummy() {}' > src/lib.rs
+# Create minimal dummy source just to download dependencies
+RUN mkdir src && echo 'fn main() {}' > src/main.rs && \
+    cargo fetch && \
+    rm -rf src
 
-# Build dependencies only (ignore errors from dummy build)
-RUN cargo build --release 2>/dev/null || true
-
-# Copy actual source code (overwrites dummy)
+# Copy actual source code
 COPY src ./src
-
-# Force full rebuild of our crate by removing all cached artifacts
-RUN rm -rf target/release/deps/ara* \
-    target/release/.fingerprint/ara* \
-    target/release/incremental \
-    target/release/build/ara* \
-    target/.rustc_info.json
 
 # Build the actual application
 RUN cargo build --release
