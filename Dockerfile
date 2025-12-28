@@ -17,17 +17,18 @@ RUN mkdir src && \
     echo 'fn main() { println!("dummy"); }' > src/main.rs && \
     echo 'pub fn dummy() {}' > src/lib.rs
 
-# Build dependencies only
-RUN cargo build --release && \
-    rm -rf src && \
-    rm -rf target/release/deps/ara_notification_service* && \
-    rm -rf target/release/.fingerprint/ara_notification_service*
+# Build dependencies only (ignore errors from dummy build)
+RUN cargo build --release 2>/dev/null || true
 
-# Copy actual source code
+# Copy actual source code (overwrites dummy)
 COPY src ./src
 
-# Debug: check what was copied
-RUN echo "=== lib.rs content ===" && cat src/lib.rs && echo "=== src directory ===" && ls -la src/
+# Force full rebuild of our crate by removing all cached artifacts
+RUN rm -rf target/release/deps/ara* \
+    target/release/.fingerprint/ara* \
+    target/release/incremental \
+    target/release/build/ara* \
+    target/.rustc_info.json
 
 # Build the actual application
 RUN cargo build --release
