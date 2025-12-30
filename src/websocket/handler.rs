@@ -495,9 +495,9 @@ fn is_valid_channel_name(name: &str) -> bool {
         return false;
     }
 
-    // Only allow alphanumeric, dash, underscore, and dot
+    // Only allow alphanumeric, dash, underscore, dot, and colon
     name.chars()
-        .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == ':')
 }
 
 #[cfg(test)]
