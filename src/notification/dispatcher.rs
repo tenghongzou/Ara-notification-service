@@ -18,6 +18,9 @@ const MAX_CONCURRENT_SENDS: usize = 100;
 /// Threshold for using pre-serialization (saves serialization overhead for larger sends)
 const PRESERIALIZATION_THRESHOLD: usize = 4;
 
+/// Batch size for processing multiple users (reduces memory pressure and allows progress reporting)
+const USER_BATCH_SIZE: usize = 100;
+
 /// Result of a notification delivery attempt
 #[derive(Debug, Clone, Serialize)]
 pub struct DeliveryResult {
@@ -240,6 +243,7 @@ impl NotificationDispatcher {
 
     /// Send notification to multiple users
     /// Offline users will have messages queued if queue is enabled.
+    /// Uses batch processing to reduce memory pressure for large user lists.
     #[tracing::instrument(
         name = "dispatcher.send_to_users",
         skip(self, event, user_ids),
@@ -257,24 +261,40 @@ impl NotificationDispatcher {
         let mut total_failed = 0;
         let mut queued_count = 0;
 
-        for user_id in user_ids {
-            let connections = self.connection_manager.get_user_connections(user_id);
+        // Process users in batches to reduce memory pressure
+        for batch in user_ids.chunks(USER_BATCH_SIZE) {
+            // Collect connections for all users in this batch
+            let mut batch_connections: Vec<Arc<ConnectionHandle>> = Vec::new();
+            let mut offline_users: Vec<&str> = Vec::new();
 
-            // If user has no connections and queue is enabled, queue the message
-            if connections.is_empty() {
+            for user_id in batch {
+                let connections = self.connection_manager.get_user_connections(user_id);
+                if connections.is_empty() {
+                    offline_users.push(user_id);
+                } else {
+                    batch_connections.extend(connections);
+                }
+            }
+
+            // Queue messages for offline users (if queue is enabled)
+            if !offline_users.is_empty() {
                 if let Some(ref queue) = self.queue_backend {
                     if queue.is_enabled() {
-                        if queue.enqueue(user_id, event.clone()).await.is_ok() {
-                            queued_count += 1;
-                            continue;
+                        for user_id in offline_users {
+                            if queue.enqueue(user_id, event.clone()).await.is_ok() {
+                                queued_count += 1;
+                            }
                         }
                     }
                 }
             }
 
-            let (delivered, failed) = self.send_to_connections(&connections, &message, Some(notification_id)).await;
-            total_delivered += delivered;
-            total_failed += failed;
+            // Send to all connections in this batch concurrently
+            if !batch_connections.is_empty() {
+                let (delivered, failed) = self.send_to_connections(&batch_connections, &message, Some(notification_id)).await;
+                total_delivered += delivered;
+                total_failed += failed;
+            }
         }
 
         // Update stats

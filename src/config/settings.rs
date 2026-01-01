@@ -403,6 +403,12 @@ fn default_redis_url() -> String {
     "redis://localhost:6379".to_string()
 }
 
+/// Valid backend types for queue and ACK storage
+const VALID_BACKENDS: &[&str] = &["memory", "redis", "postgres"];
+
+/// Valid backend types for rate limiting
+const VALID_RATELIMIT_BACKENDS: &[&str] = &["local", "redis"];
+
 impl Settings {
     pub fn new() -> Result<Self, ConfigError> {
         // Load .env file if exists
@@ -471,7 +477,92 @@ impl Settings {
                     .try_parsing(true),
             );
 
-        builder.build()?.try_deserialize()
+        let settings: Self = builder.build()?.try_deserialize()?;
+        settings.validate()?;
+        Ok(settings)
+    }
+
+    /// Validate configuration values
+    fn validate(&self) -> Result<(), ConfigError> {
+        let mut errors: Vec<String> = Vec::new();
+
+        // Validate JWT_SECRET length (minimum 32 characters for security)
+        if self.jwt.secret.len() < 32 {
+            errors.push(format!(
+                "JWT_SECRET must be at least 32 characters (current: {} characters)",
+                self.jwt.secret.len()
+            ));
+        }
+
+        // Validate Redis URL format
+        if !self.redis.url.starts_with("redis://") && !self.redis.url.starts_with("rediss://") {
+            errors.push(format!(
+                "Invalid Redis URL format: '{}'. Must start with 'redis://' or 'rediss://'",
+                self.redis.url
+            ));
+        }
+
+        // Validate port range (1-65535)
+        if self.server.port == 0 {
+            errors.push("Server port must be between 1 and 65535".to_string());
+        }
+
+        // Validate timeout values are positive
+        if self.websocket.heartbeat_interval == 0 {
+            errors.push("websocket.heartbeat_interval must be greater than 0".to_string());
+        }
+        if self.websocket.connection_timeout == 0 {
+            errors.push("websocket.connection_timeout must be greater than 0".to_string());
+        }
+        if self.ack.enabled && self.ack.timeout_seconds == 0 {
+            errors.push("ack.timeout_seconds must be greater than 0 when ACK is enabled".to_string());
+        }
+        if self.queue.enabled && self.queue.message_ttl_seconds == 0 {
+            errors.push("queue.message_ttl_seconds must be greater than 0 when queue is enabled".to_string());
+        }
+
+        // Validate backend values
+        if !VALID_BACKENDS.contains(&self.queue.backend.as_str()) {
+            errors.push(format!(
+                "Invalid queue.backend: '{}'. Must be one of: {:?}",
+                self.queue.backend, VALID_BACKENDS
+            ));
+        }
+        if !VALID_BACKENDS.contains(&self.ack.backend.as_str()) {
+            errors.push(format!(
+                "Invalid ack.backend: '{}'. Must be one of: {:?}",
+                self.ack.backend, VALID_BACKENDS
+            ));
+        }
+        if !VALID_RATELIMIT_BACKENDS.contains(&self.ratelimit.backend.as_str()) {
+            errors.push(format!(
+                "Invalid ratelimit.backend: '{}'. Must be one of: {:?}",
+                self.ratelimit.backend, VALID_RATELIMIT_BACKENDS
+            ));
+        }
+
+        // Validate OTEL sampling ratio (0.0 to 1.0)
+        if self.otel.enabled && !(0.0..=1.0).contains(&self.otel.sampling_ratio) {
+            errors.push(format!(
+                "otel.sampling_ratio must be between 0.0 and 1.0 (current: {})",
+                self.otel.sampling_ratio
+            ));
+        }
+
+        // Validate database pool size
+        if self.database.pool_size == 0 {
+            errors.push("database.pool_size must be greater than 0".to_string());
+        }
+
+        // Return errors if any
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(ConfigError::Message(format!(
+                "Configuration validation failed:\n  - {}",
+                errors.join("\n  - ")
+            )))
+        }
     }
 
     pub fn server_addr(&self) -> String {
@@ -553,5 +644,140 @@ mod tests {
         let server = ServerConfig::default();
         assert_eq!(server.host, "0.0.0.0");
         assert_eq!(server.port, 8081);
+    }
+
+    #[test]
+    fn test_valid_backends() {
+        assert!(VALID_BACKENDS.contains(&"memory"));
+        assert!(VALID_BACKENDS.contains(&"redis"));
+        assert!(VALID_BACKENDS.contains(&"postgres"));
+        assert!(!VALID_BACKENDS.contains(&"invalid"));
+    }
+
+    #[test]
+    fn test_valid_ratelimit_backends() {
+        assert!(VALID_RATELIMIT_BACKENDS.contains(&"local"));
+        assert!(VALID_RATELIMIT_BACKENDS.contains(&"redis"));
+        assert!(!VALID_RATELIMIT_BACKENDS.contains(&"memory"));
+    }
+
+    fn create_test_settings() -> Settings {
+        Settings {
+            server: ServerConfig::default(),
+            jwt: JwtConfig {
+                secret: "a]vLZ6%BJ1ywJE:*Gj[r=xGMvN!Hs.Q9".to_string(), // 32 chars
+                issuer: None,
+                audience: None,
+            },
+            redis: RedisConfig::default(),
+            api: ApiConfig::default(),
+            websocket: WebSocketConfig::default(),
+            queue: QueueConfig::default(),
+            ratelimit: RateLimitConfig::default(),
+            ack: AckSettingsConfig::default(),
+            otel: OtelConfig::default(),
+            tenant: TenantConfig::default(),
+            database: DatabaseConfig::default(),
+            cluster: ClusterConfig::default(),
+        }
+    }
+
+    #[test]
+    fn test_validate_valid_settings() {
+        let settings = create_test_settings();
+        assert!(settings.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_jwt_secret_too_short() {
+        let mut settings = create_test_settings();
+        settings.jwt.secret = "short".to_string();
+        let result = settings.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("JWT_SECRET must be at least 32 characters"));
+    }
+
+    #[test]
+    fn test_validate_invalid_redis_url() {
+        let mut settings = create_test_settings();
+        settings.redis.url = "http://localhost:6379".to_string();
+        let result = settings.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Invalid Redis URL format"));
+    }
+
+    #[test]
+    fn test_validate_rediss_url_valid() {
+        let mut settings = create_test_settings();
+        settings.redis.url = "rediss://localhost:6379".to_string();
+        assert!(settings.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_invalid_port() {
+        let mut settings = create_test_settings();
+        settings.server.port = 0;
+        let result = settings.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Server port must be between 1 and 65535"));
+    }
+
+    #[test]
+    fn test_validate_invalid_queue_backend() {
+        let mut settings = create_test_settings();
+        settings.queue.backend = "invalid".to_string();
+        let result = settings.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Invalid queue.backend"));
+    }
+
+    #[test]
+    fn test_validate_invalid_ack_backend() {
+        let mut settings = create_test_settings();
+        settings.ack.backend = "invalid".to_string();
+        let result = settings.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Invalid ack.backend"));
+    }
+
+    #[test]
+    fn test_validate_invalid_ratelimit_backend() {
+        let mut settings = create_test_settings();
+        settings.ratelimit.backend = "postgres".to_string();
+        let result = settings.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Invalid ratelimit.backend"));
+    }
+
+    #[test]
+    fn test_validate_invalid_otel_sampling_ratio() {
+        let mut settings = create_test_settings();
+        settings.otel.enabled = true;
+        settings.otel.sampling_ratio = 1.5;
+        let result = settings.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("otel.sampling_ratio must be between 0.0 and 1.0"));
+    }
+
+    #[test]
+    fn test_validate_multiple_errors() {
+        let mut settings = create_test_settings();
+        settings.jwt.secret = "short".to_string();
+        settings.server.port = 0;
+        settings.queue.backend = "invalid".to_string();
+        let result = settings.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        // Should contain all three errors
+        assert!(err.contains("JWT_SECRET"));
+        assert!(err.contains("Server port"));
+        assert!(err.contains("queue.backend"));
     }
 }

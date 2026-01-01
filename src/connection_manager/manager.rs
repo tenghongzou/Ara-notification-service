@@ -1,126 +1,33 @@
-use chrono::{DateTime, Utc};
+//! Core connection manager implementation
+
+use chrono::Utc;
 use dashmap::DashMap;
-use std::collections::HashSet;
-use std::sync::atomic::{AtomicI64, Ordering};
+use smallvec::SmallVec;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::websocket::{OutboundMessage, ServerMessage};
+/// Inline capacity for user connections (most users have 1-4 devices)
+type UserConnections = SmallVec<[Uuid; 4]>;
 
-/// Handle for a single WebSocket connection
-pub struct ConnectionHandle {
-    pub id: Uuid,
-    pub user_id: String,
-    pub tenant_id: String,
-    pub roles: Vec<String>,
-    pub sender: mpsc::Sender<OutboundMessage>,
-    pub connected_at: DateTime<Utc>,
-    /// Last activity timestamp (Unix seconds) - using AtomicI64 for lock-free updates
-    last_activity: AtomicI64,
-    pub subscriptions: RwLock<HashSet<String>>,
-}
+use crate::websocket::OutboundMessage;
 
-impl ConnectionHandle {
-    pub fn new(
-        user_id: String,
-        tenant_id: String,
-        roles: Vec<String>,
-        sender: mpsc::Sender<OutboundMessage>,
-    ) -> Self {
-        let now = Utc::now();
-        Self {
-            id: Uuid::new_v4(),
-            user_id,
-            tenant_id,
-            roles,
-            sender,
-            connected_at: now,
-            last_activity: AtomicI64::new(now.timestamp()),
-            subscriptions: RwLock::new(HashSet::new()),
-        }
-    }
-
-    pub fn update_activity(&self) {
-        self.last_activity.store(Utc::now().timestamp(), Ordering::Relaxed);
-    }
-
-    pub fn last_activity(&self) -> DateTime<Utc> {
-        DateTime::from_timestamp(self.last_activity.load(Ordering::Relaxed), 0)
-            .unwrap_or_else(Utc::now)
-    }
-
-    /// Send a ServerMessage (will be serialized when sent to WebSocket)
-    pub async fn send(&self, message: ServerMessage) -> Result<(), mpsc::error::SendError<OutboundMessage>> {
-        self.sender.send(OutboundMessage::Raw(message)).await
-    }
-
-    /// Send a pre-serialized message (for efficient multi-send scenarios)
-    pub async fn send_preserialized(&self, message: OutboundMessage) -> Result<(), mpsc::error::SendError<OutboundMessage>> {
-        self.sender.send(message).await
-    }
-
-    /// Check if user has a specific role
-    pub fn has_role(&self, role: &str) -> bool {
-        self.roles.iter().any(|r| r == role)
-    }
-
-    /// Get current subscription count
-    pub async fn subscription_count(&self) -> usize {
-        self.subscriptions.read().await.len()
-    }
-}
-
-/// Error returned when connection limits are exceeded
-#[derive(Debug, Clone)]
-pub enum ConnectionError {
-    TotalLimitExceeded { current: usize, max: usize },
-    UserLimitExceeded { user_id: String, current: usize, max: usize },
-}
-
-impl std::fmt::Display for ConnectionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::TotalLimitExceeded { current, max } => {
-                write!(f, "Total connection limit exceeded ({}/{})", current, max)
-            }
-            Self::UserLimitExceeded { user_id, current, max } => {
-                write!(f, "User {} connection limit exceeded ({}/{})", user_id, current, max)
-            }
-        }
-    }
-}
-
-/// Limits for connection management
-#[derive(Debug, Clone, Copy)]
-pub struct ConnectionLimits {
-    pub max_connections: usize,
-    pub max_connections_per_user: usize,
-    pub max_subscriptions_per_connection: usize,
-}
-
-impl Default for ConnectionLimits {
-    fn default() -> Self {
-        Self {
-            max_connections: 10000,
-            max_connections_per_user: 5,
-            max_subscriptions_per_connection: 50,
-        }
-    }
-}
+use super::stats::{ChannelInfo, ConnectionStats, TenantConnectionStats, UserSubscriptionInfo};
+use super::types::{ConnectionError, ConnectionHandle, ConnectionLimits};
 
 /// Manages all active WebSocket connections
 pub struct ConnectionManager {
     /// connection_id -> ConnectionHandle
-    connections: DashMap<Uuid, Arc<ConnectionHandle>>,
-    /// user_id -> Set<connection_id> (supports multiple devices)
-    user_index: DashMap<String, HashSet<Uuid>>,
+    pub(crate) connections: DashMap<Uuid, Arc<ConnectionHandle>>,
+    /// user_id -> connection_ids (supports multiple devices, optimized for 1-4 connections)
+    pub(crate) user_index: DashMap<String, UserConnections>,
     /// channel_name -> Set<connection_id>
-    channel_index: DashMap<String, HashSet<Uuid>>,
+    pub(crate) channel_index: DashMap<String, HashSet<Uuid>>,
     /// tenant_id -> Set<connection_id> (for multi-tenant support)
-    tenant_index: DashMap<String, HashSet<Uuid>>,
+    pub(crate) tenant_index: DashMap<String, HashSet<Uuid>>,
     /// Connection limits
-    limits: ConnectionLimits,
+    pub(crate) limits: ConnectionLimits,
 }
 
 impl ConnectionManager {
@@ -175,7 +82,8 @@ impl ConnectionManager {
 
         // Check per-user connection limit
         if limits.max_connections_per_user > 0 {
-            let user_conn_count = self.user_index
+            let user_conn_count = self
+                .user_index
                 .get(&user_id)
                 .map(|c| c.len())
                 .unwrap_or(0);
@@ -207,11 +115,8 @@ impl ConnectionManager {
         // Add to connections map
         self.connections.insert(conn_id, handle.clone());
 
-        // Update user index
-        self.user_index
-            .entry(user_id)
-            .or_default()
-            .insert(conn_id);
+        // Update user index (SmallVec optimized for 1-4 connections per user)
+        self.user_index.entry(user_id).or_default().push(conn_id);
 
         // Update tenant index
         self.tenant_index
@@ -232,9 +137,9 @@ impl ConnectionManager {
     /// Unregister a connection
     pub async fn unregister(&self, connection_id: Uuid) {
         if let Some((_, handle)) = self.connections.remove(&connection_id) {
-            // Remove from user index
+            // Remove from user index (SmallVec - use retain for removal)
             if let Some(mut user_conns) = self.user_index.get_mut(&handle.user_id) {
-                user_conns.remove(&connection_id);
+                user_conns.retain(|id| *id != connection_id);
                 if user_conns.is_empty() {
                     drop(user_conns);
                     self.user_index.remove(&handle.user_id);
@@ -272,7 +177,11 @@ impl ConnectionManager {
     }
 
     /// Subscribe a connection to a channel with limit checking
-    pub async fn subscribe_to_channel(&self, connection_id: Uuid, channel: &str) -> Result<(), String> {
+    pub async fn subscribe_to_channel(
+        &self,
+        connection_id: Uuid,
+        channel: &str,
+    ) -> Result<(), String> {
         if let Some(handle) = self.connections.get(&connection_id) {
             // Check subscription limit
             if self.limits.max_subscriptions_per_connection > 0 {
@@ -286,7 +195,11 @@ impl ConnectionManager {
             }
 
             // Update connection's subscriptions
-            handle.subscriptions.write().await.insert(channel.to_string());
+            handle
+                .subscriptions
+                .write()
+                .await
+                .insert(channel.to_string());
 
             // Update channel index
             self.channel_index
@@ -358,7 +271,7 @@ impl ConnectionManager {
 
     /// Get statistics
     pub fn stats(&self) -> ConnectionStats {
-        let mut channel_counts = std::collections::HashMap::new();
+        let mut channel_counts = HashMap::new();
         for entry in self.channel_index.iter() {
             channel_counts.insert(entry.key().clone(), entry.value().len());
         }
@@ -441,7 +354,7 @@ impl ConnectionManager {
             return None;
         }
 
-        let mut all_subscriptions = std::collections::HashSet::new();
+        let mut all_subscriptions = HashSet::new();
         for conn in &connections {
             let subs = conn.subscriptions.read().await;
             all_subscriptions.extend(subs.iter().cloned());
@@ -474,7 +387,7 @@ impl ConnectionManager {
     /// Get statistics for a specific tenant
     pub fn tenant_stats(&self, tenant_id: &str) -> TenantConnectionStats {
         let tenant_connections = self.get_tenant_connections(tenant_id);
-        let unique_users: std::collections::HashSet<_> = tenant_connections
+        let unique_users: HashSet<_> = tenant_connections
             .iter()
             .map(|c| c.user_id.clone())
             .collect();
@@ -501,7 +414,7 @@ impl ConnectionManager {
 
     /// List channels for a specific tenant (channels with at least one subscriber from the tenant)
     pub fn list_tenant_channels(&self, tenant_id: &str) -> Vec<ChannelInfo> {
-        let tenant_connections: std::collections::HashSet<_> = self
+        let tenant_connections: HashSet<_> = self
             .tenant_index
             .get(tenant_id)
             .map(|ids| ids.iter().copied().collect())
@@ -532,40 +445,10 @@ impl ConnectionManager {
     }
 }
 
-/// Tenant-specific connection statistics
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct TenantConnectionStats {
-    pub tenant_id: String,
-    pub total_connections: usize,
-    pub unique_users: usize,
-}
-
-/// Channel information
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct ChannelInfo {
-    pub name: String,
-    pub subscriber_count: usize,
-}
-
-/// User subscription information
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct UserSubscriptionInfo {
-    pub user_id: String,
-    pub connection_count: usize,
-    pub subscriptions: Vec<String>,
-}
-
 impl Default for ConnectionManager {
     fn default() -> Self {
         Self::new()
     }
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct ConnectionStats {
-    pub total_connections: usize,
-    pub unique_users: usize,
-    pub channels: std::collections::HashMap<String, usize>,
 }
 
 #[cfg(test)]
@@ -599,8 +482,14 @@ mod tests {
             .register("user-1".to_string(), DEFAULT_TENANT.to_string(), vec![], tx)
             .unwrap();
 
-        manager.subscribe_to_channel(handle.id, "orders").await.unwrap();
-        manager.subscribe_to_channel(handle.id, "alerts").await.unwrap();
+        manager
+            .subscribe_to_channel(handle.id, "orders")
+            .await
+            .unwrap();
+        manager
+            .subscribe_to_channel(handle.id, "alerts")
+            .await
+            .unwrap();
 
         let channels = manager.list_channels();
         assert_eq!(channels.len(), 2);
@@ -618,11 +507,21 @@ mod tests {
         let (tx1, _rx1) = mpsc::channel(32);
         let (tx2, _rx2) = mpsc::channel(32);
 
-        let handle1 = manager.register("user-1".to_string(), DEFAULT_TENANT.to_string(), vec![], tx1).unwrap();
-        let handle2 = manager.register("user-2".to_string(), DEFAULT_TENANT.to_string(), vec![], tx2).unwrap();
+        let handle1 = manager
+            .register("user-1".to_string(), DEFAULT_TENANT.to_string(), vec![], tx1)
+            .unwrap();
+        let handle2 = manager
+            .register("user-2".to_string(), DEFAULT_TENANT.to_string(), vec![], tx2)
+            .unwrap();
 
-        manager.subscribe_to_channel(handle1.id, "orders").await.unwrap();
-        manager.subscribe_to_channel(handle2.id, "orders").await.unwrap();
+        manager
+            .subscribe_to_channel(handle1.id, "orders")
+            .await
+            .unwrap();
+        manager
+            .subscribe_to_channel(handle2.id, "orders")
+            .await
+            .unwrap();
 
         let channels = manager.list_channels();
         assert_eq!(channels.len(), 1);
@@ -634,8 +533,13 @@ mod tests {
         let manager = create_test_manager();
         let (tx, _rx) = mpsc::channel(32);
 
-        let handle = manager.register("user-1".to_string(), DEFAULT_TENANT.to_string(), vec![], tx).unwrap();
-        manager.subscribe_to_channel(handle.id, "orders").await.unwrap();
+        let handle = manager
+            .register("user-1".to_string(), DEFAULT_TENANT.to_string(), vec![], tx)
+            .unwrap();
+        manager
+            .subscribe_to_channel(handle.id, "orders")
+            .await
+            .unwrap();
 
         let info = manager.get_channel_info("orders");
         assert!(info.is_some());
@@ -656,8 +560,13 @@ mod tests {
         let manager = create_test_manager();
         let (tx, _rx) = mpsc::channel(32);
 
-        let handle = manager.register("user-1".to_string(), DEFAULT_TENANT.to_string(), vec![], tx).unwrap();
-        manager.subscribe_to_channel(handle.id, "orders").await.unwrap();
+        let handle = manager
+            .register("user-1".to_string(), DEFAULT_TENANT.to_string(), vec![], tx)
+            .unwrap();
+        manager
+            .subscribe_to_channel(handle.id, "orders")
+            .await
+            .unwrap();
 
         assert!(manager.channel_exists("orders"));
         assert!(!manager.channel_exists("nonexistent"));
@@ -668,9 +577,17 @@ mod tests {
         let manager = create_test_manager();
         let (tx, _rx) = mpsc::channel(32);
 
-        let handle = manager.register("user-1".to_string(), DEFAULT_TENANT.to_string(), vec![], tx).unwrap();
-        manager.subscribe_to_channel(handle.id, "orders").await.unwrap();
-        manager.subscribe_to_channel(handle.id, "alerts").await.unwrap();
+        let handle = manager
+            .register("user-1".to_string(), DEFAULT_TENANT.to_string(), vec![], tx)
+            .unwrap();
+        manager
+            .subscribe_to_channel(handle.id, "orders")
+            .await
+            .unwrap();
+        manager
+            .subscribe_to_channel(handle.id, "alerts")
+            .await
+            .unwrap();
 
         let subs = manager.get_user_subscriptions("user-1").await;
         assert!(subs.is_some());
@@ -697,13 +614,26 @@ mod tests {
         let (tx1, _rx1) = mpsc::channel(32);
         let (tx2, _rx2) = mpsc::channel(32);
 
-        let handle1 = manager.register("user-1".to_string(), DEFAULT_TENANT.to_string(), vec![], tx1).unwrap();
-        let handle2 = manager.register("user-1".to_string(), DEFAULT_TENANT.to_string(), vec![], tx2).unwrap();
+        let handle1 = manager
+            .register("user-1".to_string(), DEFAULT_TENANT.to_string(), vec![], tx1)
+            .unwrap();
+        let handle2 = manager
+            .register("user-1".to_string(), DEFAULT_TENANT.to_string(), vec![], tx2)
+            .unwrap();
 
         // Different subscriptions on each connection
-        manager.subscribe_to_channel(handle1.id, "orders").await.unwrap();
-        manager.subscribe_to_channel(handle2.id, "alerts").await.unwrap();
-        manager.subscribe_to_channel(handle2.id, "orders").await.unwrap(); // Duplicate
+        manager
+            .subscribe_to_channel(handle1.id, "orders")
+            .await
+            .unwrap();
+        manager
+            .subscribe_to_channel(handle2.id, "alerts")
+            .await
+            .unwrap();
+        manager
+            .subscribe_to_channel(handle2.id, "orders")
+            .await
+            .unwrap(); // Duplicate
 
         let subs = manager.get_user_subscriptions("user-1").await;
         assert!(subs.is_some());
@@ -719,8 +649,13 @@ mod tests {
         let manager = create_test_manager();
         let (tx, _rx) = mpsc::channel(32);
 
-        let handle = manager.register("user-1".to_string(), DEFAULT_TENANT.to_string(), vec![], tx).unwrap();
-        manager.subscribe_to_channel(handle.id, "orders").await.unwrap();
+        let handle = manager
+            .register("user-1".to_string(), DEFAULT_TENANT.to_string(), vec![], tx)
+            .unwrap();
+        manager
+            .subscribe_to_channel(handle.id, "orders")
+            .await
+            .unwrap();
 
         assert!(manager.channel_exists("orders"));
 

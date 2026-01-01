@@ -11,6 +11,7 @@ pub mod queue;
 pub mod ratelimit;
 pub mod redis;
 pub mod server;
+pub mod shutdown;
 pub mod sse;
 pub mod tasks;
 pub mod telemetry;

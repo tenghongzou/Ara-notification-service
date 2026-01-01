@@ -81,6 +81,15 @@ pub enum ServerMessage {
         code: String,
         message: String,
     },
+    /// Server shutdown notification - sent to all clients before shutdown
+    #[serde(rename = "shutdown")]
+    Shutdown {
+        /// Reason for shutdown
+        reason: String,
+        /// Seconds until server stops accepting new connections (optional)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reconnect_after_seconds: Option<u64>,
+    },
 }
 
 impl ServerMessage {
@@ -101,5 +110,12 @@ impl ServerMessage {
 
     pub fn acked(notification_id: Uuid) -> Self {
         Self::Acked { notification_id }
+    }
+
+    pub fn shutdown(reason: impl Into<String>, reconnect_after_seconds: Option<u64>) -> Self {
+        Self::Shutdown {
+            reason: reason.into(),
+            reconnect_after_seconds,
+        }
     }
 }

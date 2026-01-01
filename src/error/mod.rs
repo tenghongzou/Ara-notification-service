@@ -25,6 +25,21 @@ pub enum AppError {
 
     #[error("Redis error: {0}")]
     Redis(#[from] redis::RedisError),
+
+    #[error("Rate limit exceeded: {0}")]
+    RateLimitExceeded(String),
+
+    #[error("Connection limit exceeded: {0}")]
+    ConnectionLimitExceeded(String),
+
+    #[error("Queue error: {0}")]
+    Queue(String),
+
+    #[error("Timeout: {0}")]
+    Timeout(String),
+
+    #[error("Cluster error: {0}")]
+    ClusterError(String),
 }
 
 #[derive(Serialize)]
@@ -92,6 +107,42 @@ impl IntoResponse for AppError {
                     log_msg.clone()
                 };
                 (StatusCode::INTERNAL_SERVER_ERROR, "REDIS_ERROR", client_msg, log_msg)
+            }
+            AppError::RateLimitExceeded(msg) => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "RATE_LIMIT_EXCEEDED",
+                msg.clone(),
+                msg.clone(),
+            ),
+            AppError::ConnectionLimitExceeded(msg) => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "CONNECTION_LIMIT_EXCEEDED",
+                msg.clone(),
+                msg.clone(),
+            ),
+            AppError::Queue(e) => {
+                let log_msg = e.clone();
+                let client_msg = if is_production() {
+                    "Message queue error".to_string()
+                } else {
+                    log_msg.clone()
+                };
+                (StatusCode::SERVICE_UNAVAILABLE, "QUEUE_ERROR", client_msg, log_msg)
+            }
+            AppError::Timeout(msg) => (
+                StatusCode::GATEWAY_TIMEOUT,
+                "TIMEOUT",
+                msg.clone(),
+                msg.clone(),
+            ),
+            AppError::ClusterError(e) => {
+                let log_msg = e.clone();
+                let client_msg = if is_production() {
+                    "Cluster communication error".to_string()
+                } else {
+                    log_msg.clone()
+                };
+                (StatusCode::SERVICE_UNAVAILABLE, "CLUSTER_ERROR", client_msg, log_msg)
             }
         };
 

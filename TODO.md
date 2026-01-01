@@ -2,90 +2,87 @@
 
 ## 待完成項目
 
-### 1. 配置驗證 (中優先級)
-
-**位置**: `src/config/settings.rs`
-
-**需求**:
-在 `Settings::new()` 中加入配置驗證，防止無效配置導致運行時錯誤。
-
-**驗證項目**:
-- [ ] JWT_SECRET 長度至少 32 字元
-- [ ] Redis URL 格式正確
-- [ ] Port 在有效範圍內 (1-65535)
-- [ ] 超時設定為正數
-- [ ] Backend 設定為有效值 ("memory", "redis", "postgres")
-
----
-
-### 2. 健康檢查擴展 (中優先級)
-
-**位置**: `src/api/handlers.rs`
-
-**需求**:
-擴展 `/health` 端點，包含更多診斷資訊。
-
-**新增欄位**:
-- [ ] `postgres: Option<PostgresHealth>` - PostgreSQL 連線狀態
-- [ ] `connections: ConnectionHealth` - 當前連線統計
-- [ ] `uptime_seconds: u64` - 服務運行時間
-- [ ] `queue: QueueHealth` - 佇列狀態
-- [ ] `cluster: Option<ClusterHealth>` - 叢集狀態 (如啟用)
-
----
-
-### 3. API 錯誤類型擴展 (低優先級)
-
-**位置**: `src/error/mod.rs`
-
-**需求**:
-增加更精細的錯誤類型以改善 API 回應。
-
-**新增錯誤**:
-- [ ] `RateLimitExceeded(String)`
-- [ ] `ConnectionLimitExceeded(String)`
-- [ ] `Queue(String)`
-- [ ] `Timeout(String)`
-- [ ] `ClusterError(String)`
-
----
-
-### 4. 效能優化 (低優先級)
-
-**Dispatcher 批次處理**
-
-**位置**: `src/notification/dispatcher.rs:249-296`
-
-**需求**:
-對於大量用戶的通知發送，實作分批處理以減少記憶體壓力。
-
-```rust
-const BATCH_SIZE: usize = 100;
-
-pub async fn send_to_users(&self, user_ids: &[String], event: NotificationEvent) -> DeliveryResult {
-    for batch in user_ids.chunks(BATCH_SIZE) {
-        // 批次處理
-    }
-}
-```
-
----
-
-**連線管理記憶體優化**
-
-**位置**: `src/connection_manager/manager.rs:16-27`
-
-**需求**:
-考慮使用 `SmallVec` 替代 `HashSet<Uuid>` 存儲用戶連線 ID。
-
-```rust
-use smallvec::SmallVec;
-pub(crate) user_index: DashMap<String, SmallVec<[Uuid; 4]>>,
-```
+*目前無待處理項目*
 
 ---
 
 ## 已完成項目
+
+### 配置驗證 ✅
+
+**完成日期**: 2026-01-01
+
+**位置**: `src/config/settings.rs`
+
+**變更摘要**:
+- [x] JWT_SECRET 長度至少 32 字元
+- [x] Redis URL 格式正確 (redis:// 或 rediss://)
+- [x] Port 在有效範圍內 (1-65535)
+- [x] 超時設定為正數
+- [x] Backend 設定為有效值 ("memory", "redis", "postgres")
+- [x] OTEL 採樣率在 0.0-1.0 範圍內
+- [x] 資料庫連線池大小 > 0
+- [x] 新增 `validate()` 方法並整合至 `Settings::new()`
+- [x] 新增 12 個驗證相關測試
+
+---
+
+### 健康檢查擴展 ✅
+
+**完成日期**: 2026-01-01
+
+**位置**: `src/api/handlers.rs`, `src/server/state.rs`
+
+**變更摘要**:
+- [x] `postgres: Option<PostgresHealth>` - PostgreSQL 連線狀態
+- [x] `connections: ConnectionHealth` - 當前連線統計
+- [x] `uptime_seconds: u64` - 服務運行時間 (透過 `AppState.start_time`)
+- [x] `queue: QueueHealth` - 佇列狀態
+- [x] `cluster: Option<ClusterHealth>` - 叢集狀態 (如啟用)
+
+---
+
+### API 錯誤類型擴展 ✅
+
+**完成日期**: 2026-01-01
+
+**位置**: `src/error/mod.rs`
+
+**新增錯誤類型**:
+- [x] `RateLimitExceeded(String)` - HTTP 429
+- [x] `ConnectionLimitExceeded(String)` - HTTP 429
+- [x] `Queue(String)` - HTTP 503
+- [x] `Timeout(String)` - HTTP 504
+- [x] `ClusterError(String)` - HTTP 503
+
+---
+
+### 效能優化 ✅
+
+**完成日期**: 2026-01-01
+
+**Dispatcher 批次處理**
+
+**位置**: `src/notification/dispatcher.rs`
+
+**變更摘要**:
+- [x] 新增 `USER_BATCH_SIZE = 100` 常數
+- [x] `send_to_users()` 使用 `chunks()` 分批處理用戶
+- [x] 每批次收集所有連線後統一發送
+- [x] 離線用戶訊息批次排隊
+
+**連線管理記憶體優化**
+
+**位置**: `src/connection_manager/manager.rs`
+
+**變更摘要**:
+- [x] 新增 `smallvec` 依賴
+- [x] `user_index` 使用 `SmallVec<[Uuid; 4]>` 替代 `HashSet<Uuid>`
+- [x] 大多數用戶 (1-4 連線) 避免堆積分配
+- [x] 更新 `register()` 使用 `push()`
+- [x] 更新 `unregister()` 使用 `retain()`
+
+---
 
 ### Legacy Backend 遷移 ✅
 
@@ -121,11 +118,11 @@ pub(crate) user_index: DashMap<String, SmallVec<[Uuid; 4]>>,
 | 項目 | 位置 | 優先級 | 狀態 |
 |-----|------|--------|-----|
 | Legacy Queue/ACK 遷移 | `server/state.rs` | 高 | ✅ 已完成 |
-| 配置驗證 | `config/settings.rs` | 中 | 待處理 |
-| 健康檢查擴展 | `api/handlers.rs` | 中 | 待處理 |
-| 錯誤類型擴展 | `error/mod.rs` | 低 | 待處理 |
-| Dispatcher 批次處理 | `notification/dispatcher.rs` | 低 | 待處理 |
-| SmallVec 優化 | `connection_manager/manager.rs` | 低 | 待處理 |
+| 配置驗證 | `config/settings.rs` | 中 | ✅ 已完成 |
+| 健康檢查擴展 | `api/handlers.rs` | 中 | ✅ 已完成 |
+| 錯誤類型擴展 | `error/mod.rs` | 低 | ✅ 已完成 |
+| Dispatcher 批次處理 | `notification/dispatcher.rs` | 低 | ✅ 已完成 |
+| SmallVec 優化 | `connection_manager/manager.rs` | 低 | ✅ 已完成 |
 
 ---
 

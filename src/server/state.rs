@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::auth::JwtValidator;
 use crate::cluster::{create_session_store, ClusterRouter, SessionStore};
@@ -34,6 +35,8 @@ pub struct AppState {
     pub session_store: Arc<dyn SessionStore>,
     /// Cluster router for cross-server message delivery
     pub cluster_router: Arc<ClusterRouter>,
+    /// Server start time for uptime calculation
+    pub start_time: Instant,
 }
 
 impl AppState {
@@ -160,6 +163,7 @@ impl AppState {
             ack_backend,
             session_store,
             cluster_router,
+            start_time: Instant::now(),
         }
     }
 }

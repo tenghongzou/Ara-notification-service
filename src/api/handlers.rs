@@ -13,13 +13,49 @@ use crate::tenant::{TenantInfo, TenantStatsSnapshot};
 pub struct HealthResponse {
     pub status: String,
     pub version: String,
+    pub uptime_seconds: u64,
     pub redis: RedisHealthResponse,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub postgres: Option<PostgresHealthResponse>,
+    pub connections: ConnectionHealthResponse,
+    pub queue: QueueHealthResponse,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cluster: Option<ClusterHealthResponse>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct RedisHealthResponse {
     pub status: String,
     pub connected: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PostgresHealthResponse {
+    pub status: String,
+    pub connected: bool,
+    pub pool_size: u32,
+    pub idle_connections: u32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConnectionHealthResponse {
+    pub total: usize,
+    pub unique_users: usize,
+    pub channels_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct QueueHealthResponse {
+    pub enabled: bool,
+    pub backend: String,
+    pub total_messages: usize,
+    pub users_with_queue: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ClusterHealthResponse {
+    pub enabled: bool,
+    pub server_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -71,15 +107,68 @@ pub struct AckStats {
 
 pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     let redis_health = state.redis_health.stats();
-    let is_healthy = redis_health.status == crate::redis::RedisHealthStatus::Healthy;
+    let is_redis_healthy = redis_health.status == crate::redis::RedisHealthStatus::Healthy;
+
+    // Calculate uptime
+    let uptime_seconds = state.start_time.elapsed().as_secs();
+
+    // Get connection stats
+    let conn_stats = state.connection_manager.stats();
+
+    // Get queue stats
+    let queue_stats = state.queue_backend.stats().await;
+
+    // Check PostgreSQL health if available
+    let postgres = if let Some(ref pool) = state.postgres_pool {
+        let inner_pool = pool.pool();
+        Some(PostgresHealthResponse {
+            status: "connected".to_string(),
+            connected: pool.is_available(),
+            pool_size: inner_pool.size(),
+            idle_connections: inner_pool.num_idle() as u32,
+        })
+    } else {
+        None
+    };
+
+    // Check cluster health if enabled
+    let cluster = if state.settings.cluster.enabled {
+        Some(ClusterHealthResponse {
+            enabled: true,
+            server_id: state.settings.cluster.server_id.clone(),
+        })
+    } else {
+        None
+    };
+
+    // Determine overall status
+    let status = if is_redis_healthy {
+        "healthy"
+    } else {
+        "degraded"
+    };
 
     Json(HealthResponse {
-        status: if is_healthy { "healthy".to_string() } else { "degraded".to_string() },
+        status: status.to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
+        uptime_seconds,
         redis: RedisHealthResponse {
             status: redis_health.status.as_str().to_string(),
-            connected: is_healthy,
+            connected: is_redis_healthy,
         },
+        postgres,
+        connections: ConnectionHealthResponse {
+            total: conn_stats.total_connections,
+            unique_users: conn_stats.unique_users,
+            channels_count: conn_stats.channels.len(),
+        },
+        queue: QueueHealthResponse {
+            enabled: state.queue_backend.is_enabled(),
+            backend: state.settings.queue.backend.clone(),
+            total_messages: queue_stats.total_messages,
+            users_with_queue: queue_stats.users_with_queue,
+        },
+        cluster,
     })
 }
 
