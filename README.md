@@ -2,9 +2,15 @@
 
 高效能即時通知服務，使用 Rust 建構，提供 WebSocket/SSE 即時推播功能。
 
+High-performance real-time notification service built with Rust, providing WebSocket/SSE push capabilities.
+
 [![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](CHANGELOG.md)
 [![Rust](https://img.shields.io/badge/rust-1.75+-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
+> **Documentation | 文件**
+> - [English Documentation](docs/en/README.md)
+> - [繁體中文文件](docs/zh-TW/README.md)
 
 ## 特性
 
