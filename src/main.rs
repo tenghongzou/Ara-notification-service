@@ -10,6 +10,7 @@ use tokio::time::timeout;
 use ara_notification_service::cluster::RoutedMessageSubscriber;
 use ara_notification_service::config::Settings;
 use ara_notification_service::server::{create_app, AppState};
+use ara_notification_service::shutdown::GracefulShutdown;
 use ara_notification_service::tasks::HeartbeatTask;
 use ara_notification_service::telemetry::init_telemetry;
 use ara_notification_service::triggers::RedisSubscriber;
@@ -77,6 +78,13 @@ async fn main() -> Result<()> {
         None
     };
 
+    // Create graceful shutdown handler (before moving state to app)
+    let graceful_shutdown = GracefulShutdown::new(
+        state.connection_manager.clone(),
+        state.queue_backend.clone(),
+        shutdown_signal.clone(),
+    );
+
     // Create Axum app
     let app = create_app(state);
 
@@ -93,6 +101,16 @@ async fn main() -> Result<()> {
     )
     .with_graceful_shutdown(shutdown_signal_handler(shutdown_signal))
     .await?;
+
+    // Execute graceful shutdown sequence (notify clients, drain queues, etc.)
+    let shutdown_result = graceful_shutdown.execute("Server shutting down").await;
+    tracing::info!(
+        clients_notified = shutdown_result.clients_notified,
+        connections_closed = shutdown_result.connections_closed,
+        queue_drained = shutdown_result.queue_drained,
+        duration_ms = shutdown_result.duration.as_millis(),
+        "Graceful shutdown phase completed"
+    );
 
     // Wait for background tasks to finish with timeout
     const SHUTDOWN_TIMEOUT_SECS: u64 = 30;

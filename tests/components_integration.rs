@@ -13,12 +13,13 @@ use serde_json::json;
 use uuid::Uuid;
 
 use ara_notification_service::cluster::{create_session_store, ClusterConfig, ClusterRouter};
+use ara_notification_service::config::{AckConfig as SettingsAckConfig, QueueConfig as SettingsQueueConfig};
 use ara_notification_service::connection_manager::{ConnectionLimits, ConnectionManager};
 use ara_notification_service::notification::{
-    AckConfig, AckTracker, NotificationBuilder, NotificationDispatcher, NotificationTarget,
-    Priority,
+    create_ack_backend, AckTrackerBackend, NotificationBuilder, NotificationDispatcher,
+    NotificationTarget, Priority,
 };
-use ara_notification_service::queue::{QueueConfig, UserMessageQueue};
+use ara_notification_service::queue::{create_queue_backend, MessageQueueBackend};
 use ara_notification_service::ratelimit::{RateLimitConfig, RateLimiter};
 use ara_notification_service::template::{Template, TemplateStore};
 use ara_notification_service::tenant::{TenantConfig, TenantContext, TenantManager};
@@ -32,25 +33,29 @@ fn create_full_test_environment() -> TestEnvironment {
     };
     let connection_manager = Arc::new(ConnectionManager::with_limits(limits));
 
-    let queue_config = QueueConfig {
+    // Create queue backend using factory
+    let queue_config = SettingsQueueConfig {
         enabled: true,
-        max_queue_size_per_user: 100,
+        backend: "memory".to_string(),
+        max_size_per_user: 100,
         message_ttl_seconds: 3600,
         cleanup_interval_seconds: 300,
     };
-    let message_queue = Arc::new(UserMessageQueue::new(queue_config));
+    let queue_backend = create_queue_backend(&queue_config, None, None, None);
 
-    let ack_config = AckConfig {
+    // Create ACK backend using factory
+    let ack_config = SettingsAckConfig {
         enabled: true,
+        backend: "memory".to_string(),
         timeout_seconds: 30,
         cleanup_interval_seconds: 60,
     };
-    let ack_tracker = Arc::new(AckTracker::with_config(ack_config));
+    let ack_backend = create_ack_backend(&ack_config, None, None, None);
 
-    let dispatcher = Arc::new(NotificationDispatcher::with_config(
+    let dispatcher = Arc::new(NotificationDispatcher::with_backends(
         connection_manager.clone(),
-        message_queue.clone(),
-        ack_tracker.clone(),
+        queue_backend.clone(),
+        ack_backend.clone(),
     ));
 
     let cluster_config = ClusterConfig {
@@ -87,8 +92,8 @@ fn create_full_test_environment() -> TestEnvironment {
     TestEnvironment {
         connection_manager,
         dispatcher,
-        message_queue,
-        ack_tracker,
+        queue_backend,
+        ack_backend,
         cluster_router,
         session_store,
         template_store,
@@ -100,8 +105,8 @@ fn create_full_test_environment() -> TestEnvironment {
 struct TestEnvironment {
     connection_manager: Arc<ConnectionManager>,
     dispatcher: Arc<NotificationDispatcher>,
-    message_queue: Arc<UserMessageQueue>,
-    ack_tracker: Arc<AckTracker>,
+    queue_backend: Arc<dyn MessageQueueBackend>,
+    ack_backend: Arc<dyn AckTrackerBackend>,
     cluster_router: Arc<ClusterRouter>,
     session_store: Arc<dyn ara_notification_service::cluster::SessionStore>,
     template_store: Arc<TemplateStore>,
@@ -485,33 +490,35 @@ mod rate_limiter_tests {
 mod queue_tests {
     use super::*;
 
-    #[test]
-    fn test_queue_config() {
-        let config = QueueConfig {
+    #[tokio::test]
+    async fn test_queue_config() {
+        let config = SettingsQueueConfig {
             enabled: true,
-            max_queue_size_per_user: 100,
+            backend: "memory".to_string(),
+            max_size_per_user: 100,
             message_ttl_seconds: 3600,
             cleanup_interval_seconds: 300,
         };
-        let queue = UserMessageQueue::new(config);
+        let queue = create_queue_backend(&config, None, None, None);
 
-        let stats = queue.stats();
+        let stats = queue.stats().await;
         assert!(stats.enabled);
         assert_eq!(stats.max_queue_size_config, 100);
         assert_eq!(stats.message_ttl_seconds, 3600);
     }
 
-    #[test]
-    fn test_queue_disabled() {
-        let config = QueueConfig {
+    #[tokio::test]
+    async fn test_queue_disabled() {
+        let config = SettingsQueueConfig {
             enabled: false,
-            max_queue_size_per_user: 100,
+            backend: "memory".to_string(),
+            max_size_per_user: 100,
             message_ttl_seconds: 3600,
             cleanup_interval_seconds: 300,
         };
-        let queue = UserMessageQueue::new(config);
+        let queue = create_queue_backend(&config, None, None, None);
 
-        let stats = queue.stats();
+        let stats = queue.stats().await;
         assert!(!stats.enabled);
     }
 }
@@ -523,78 +530,79 @@ mod queue_tests {
 mod ack_tracker_tests {
     use super::*;
 
-    #[test]
-    fn test_ack_track_and_acknowledge() {
+    #[tokio::test]
+    async fn test_ack_track_and_acknowledge() {
         let env = create_full_test_environment();
 
         // Track a notification
         let notification_id = Uuid::new_v4();
         let connection_id = Uuid::new_v4();
-        env.ack_tracker.track(notification_id, "user-1", connection_id);
+        env.ack_backend.track(notification_id, "user-1", connection_id).await;
 
         // Acknowledge it
-        let result = env.ack_tracker.acknowledge(notification_id, "user-1");
+        let result = env.ack_backend.acknowledge(notification_id, "user-1").await;
         assert!(result);
 
         // Acknowledging again should return false
-        let result2 = env.ack_tracker.acknowledge(notification_id, "user-1");
+        let result2 = env.ack_backend.acknowledge(notification_id, "user-1").await;
         assert!(!result2);
     }
 
-    #[test]
-    fn test_ack_wrong_user() {
+    #[tokio::test]
+    async fn test_ack_wrong_user() {
         let env = create_full_test_environment();
 
         let notification_id = Uuid::new_v4();
         let connection_id = Uuid::new_v4();
-        env.ack_tracker.track(notification_id, "user-1", connection_id);
+        env.ack_backend.track(notification_id, "user-1", connection_id).await;
 
         // Wrong user should not be able to acknowledge
-        let result = env.ack_tracker.acknowledge(notification_id, "user-2");
+        let result = env.ack_backend.acknowledge(notification_id, "user-2").await;
         assert!(!result);
 
         // Correct user should succeed
-        let result2 = env.ack_tracker.acknowledge(notification_id, "user-1");
+        let result2 = env.ack_backend.acknowledge(notification_id, "user-1").await;
         assert!(result2);
     }
 
-    #[test]
-    fn test_ack_stats() {
+    #[tokio::test]
+    async fn test_ack_stats() {
         let env = create_full_test_environment();
 
         // Track and acknowledge several notifications
         for i in 0..5 {
             let notif_id = Uuid::new_v4();
             let conn_id = Uuid::new_v4();
-            env.ack_tracker.track(notif_id, "user-1", conn_id);
+            env.ack_backend.track(notif_id, "user-1", conn_id).await;
 
             // Acknowledge only first 3
             if i < 3 {
-                env.ack_tracker.acknowledge(notif_id, "user-1");
+                env.ack_backend.acknowledge(notif_id, "user-1").await;
             }
         }
 
-        let stats = env.ack_tracker.stats();
+        let stats = env.ack_backend.stats().await;
         assert_eq!(stats.total_tracked, 5);
         assert_eq!(stats.total_acked, 3);
     }
 
-    #[test]
-    fn test_ack_disabled() {
-        let config = AckConfig {
+    #[tokio::test]
+    async fn test_ack_disabled() {
+        let config = SettingsAckConfig {
             enabled: false,
+            backend: "memory".to_string(),
             timeout_seconds: 30,
             cleanup_interval_seconds: 60,
         };
-        let tracker = AckTracker::with_config(config);
+        let tracker = create_ack_backend(&config, None, None, None);
 
         let notification_id = Uuid::new_v4();
         let connection_id = Uuid::new_v4();
 
         // Should be no-op when disabled
-        tracker.track(notification_id, "user-1", connection_id);
+        tracker.track(notification_id, "user-1", connection_id).await;
 
-        let stats = tracker.stats();
+        let stats = tracker.stats().await;
         assert_eq!(stats.total_tracked, 0);
     }
 }

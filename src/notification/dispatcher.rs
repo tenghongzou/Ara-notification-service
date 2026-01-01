@@ -7,10 +7,10 @@ use uuid::Uuid;
 
 use crate::connection_manager::{ConnectionHandle, ConnectionManager};
 use crate::metrics::MessageMetrics;
-use crate::queue::UserMessageQueue;
+use crate::queue::MessageQueueBackend;
 use crate::websocket::{OutboundMessage, ServerMessage};
 
-use super::{AckTracker, NotificationEvent, NotificationTarget};
+use super::{AckTrackerBackend, NotificationEvent, NotificationTarget};
 
 /// Maximum number of concurrent message sends
 const MAX_CONCURRENT_SENDS: usize = 100;
@@ -86,54 +86,57 @@ pub struct DispatcherStatsSnapshot {
 /// Dispatches notifications to connected clients
 pub struct NotificationDispatcher {
     connection_manager: Arc<ConnectionManager>,
-    message_queue: Option<Arc<UserMessageQueue>>,
-    ack_tracker: Option<Arc<AckTracker>>,
+    queue_backend: Option<Arc<dyn MessageQueueBackend>>,
+    ack_backend: Option<Arc<dyn AckTrackerBackend>>,
     stats: DispatcherStats,
 }
 
 impl NotificationDispatcher {
-    /// Create a new dispatcher
+    /// Create a new dispatcher without queue or ACK support
     pub fn new(connection_manager: Arc<ConnectionManager>) -> Self {
         Self {
             connection_manager,
-            message_queue: None,
-            ack_tracker: None,
+            queue_backend: None,
+            ack_backend: None,
             stats: DispatcherStats::default(),
         }
     }
 
-    /// Create a new dispatcher with message queue support
-    pub fn with_queue(connection_manager: Arc<ConnectionManager>, queue: Arc<UserMessageQueue>) -> Self {
-        Self {
-            connection_manager,
-            message_queue: Some(queue),
-            ack_tracker: None,
-            stats: DispatcherStats::default(),
-        }
-    }
-
-    /// Create a new dispatcher with full configuration
-    pub fn with_config(
+    /// Create a new dispatcher with queue backend support
+    pub fn with_queue(
         connection_manager: Arc<ConnectionManager>,
-        queue: Arc<UserMessageQueue>,
-        ack_tracker: Arc<AckTracker>,
+        queue_backend: Arc<dyn MessageQueueBackend>,
     ) -> Self {
         Self {
             connection_manager,
-            message_queue: Some(queue),
-            ack_tracker: Some(ack_tracker),
+            queue_backend: Some(queue_backend),
+            ack_backend: None,
             stats: DispatcherStats::default(),
         }
     }
 
-    /// Set the message queue (for deferred initialization)
-    pub fn set_message_queue(&mut self, queue: Arc<UserMessageQueue>) {
-        self.message_queue = Some(queue);
+    /// Create a new dispatcher with full backend configuration
+    pub fn with_backends(
+        connection_manager: Arc<ConnectionManager>,
+        queue_backend: Arc<dyn MessageQueueBackend>,
+        ack_backend: Arc<dyn AckTrackerBackend>,
+    ) -> Self {
+        Self {
+            connection_manager,
+            queue_backend: Some(queue_backend),
+            ack_backend: Some(ack_backend),
+            stats: DispatcherStats::default(),
+        }
     }
 
-    /// Set the ACK tracker (for deferred initialization)
-    pub fn set_ack_tracker(&mut self, tracker: Arc<AckTracker>) {
-        self.ack_tracker = Some(tracker);
+    /// Set the queue backend (for deferred initialization)
+    pub fn set_queue_backend(&mut self, queue_backend: Arc<dyn MessageQueueBackend>) {
+        self.queue_backend = Some(queue_backend);
+    }
+
+    /// Set the ACK backend (for deferred initialization)
+    pub fn set_ack_backend(&mut self, ack_backend: Arc<dyn AckTrackerBackend>) {
+        self.ack_backend = Some(ack_backend);
     }
 
     /// Get dispatcher statistics
@@ -183,9 +186,9 @@ impl NotificationDispatcher {
 
         // If user has no connections and queue is enabled, queue the message
         if connections.is_empty() {
-            if let Some(ref queue) = self.message_queue {
+            if let Some(ref queue) = self.queue_backend {
                 if queue.is_enabled() {
-                    match queue.enqueue(user_id, event.clone()) {
+                    match queue.enqueue(user_id, event.clone()).await {
                         Ok(()) => {
                             tracing::debug!(
                                 user_id = %user_id,
@@ -259,10 +262,12 @@ impl NotificationDispatcher {
 
             // If user has no connections and queue is enabled, queue the message
             if connections.is_empty() {
-                if let Some(ref queue) = self.message_queue {
-                    if queue.is_enabled() && queue.enqueue(user_id, event.clone()).is_ok() {
-                        queued_count += 1;
-                        continue;
+                if let Some(ref queue) = self.queue_backend {
+                    if queue.is_enabled() {
+                        if queue.enqueue(user_id, event.clone()).await.is_ok() {
+                            queued_count += 1;
+                            continue;
+                        }
                     }
                 }
             }
@@ -437,8 +442,8 @@ impl NotificationDispatcher {
                     Ok(_) => {
                         delivered += 1;
                         // Track ACK if enabled
-                        if let (Some(notif_id), Some(tracker)) = (notification_id, &self.ack_tracker) {
-                            tracker.track(notif_id, &conn.user_id, conn.id);
+                        if let (Some(notif_id), Some(tracker)) = (notification_id, &self.ack_backend) {
+                            tracker.track(notif_id, &conn.user_id, conn.id).await;
                         }
                     }
                     Err(_) => failed += 1,
@@ -487,8 +492,8 @@ impl NotificationDispatcher {
                     match result {
                         Some(conn) => {
                             delivered += 1;
-                            if let (Some(notif_id), Some(tracker)) = (notification_id, &self.ack_tracker) {
-                                tracker.track(notif_id, &conn.user_id, conn.id);
+                            if let (Some(notif_id), Some(tracker)) = (notification_id, &self.ack_backend) {
+                                tracker.track(notif_id, &conn.user_id, conn.id).await;
                             }
                         }
                         None => failed += 1,
@@ -504,8 +509,8 @@ impl NotificationDispatcher {
             match result {
                 Some(conn) => {
                     delivered += 1;
-                    if let (Some(notif_id), Some(tracker)) = (notification_id, &self.ack_tracker) {
-                        tracker.track(notif_id, &conn.user_id, conn.id);
+                    if let (Some(notif_id), Some(tracker)) = (notification_id, &self.ack_backend) {
+                        tracker.track(notif_id, &conn.user_id, conn.id).await;
                     }
                 }
                 None => failed += 1,

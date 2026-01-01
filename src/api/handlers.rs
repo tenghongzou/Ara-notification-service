@@ -96,8 +96,8 @@ pub async fn stats(State(state): State<AppState>) -> Json<StatsResponse> {
     };
 
     // Get ACK stats if enabled
-    let ack_stats = if state.ack_tracker.is_enabled() {
-        let ack = state.ack_tracker.stats();
+    let ack_stats = if state.ack_backend.is_enabled() {
+        let ack = state.ack_backend.stats().await;
         Some(AckStats {
             enabled: true,
             total_tracked: ack.total_tracked,
@@ -294,15 +294,15 @@ async fn update_metrics_from_state(state: &AppState) {
     metrics::REDIS_CIRCUIT_BREAKER_STATE.set(cb_state);
 
     // Queue metrics
-    if state.message_queue.is_enabled() {
-        let queue_stats = state.message_queue.stats();
+    if state.queue_backend.is_enabled() {
+        let queue_stats = state.queue_backend.stats().await;
         metrics::QUEUE_SIZE_TOTAL.set(queue_stats.total_messages as i64);
         metrics::QUEUE_USERS_TOTAL.set(queue_stats.users_with_queue as i64);
     }
 
     // ACK metrics
-    if state.ack_tracker.is_enabled() {
-        let ack_stats = state.ack_tracker.stats();
+    if state.ack_backend.is_enabled() {
+        let ack_stats = state.ack_backend.stats().await;
         metrics::ACK_PENDING.set(ack_stats.pending_count as i64);
     }
 }

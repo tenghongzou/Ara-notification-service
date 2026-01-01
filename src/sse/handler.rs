@@ -106,17 +106,41 @@ pub async fn sse_handler(
     );
 
     // Replay any queued messages for this user
-    if state.message_queue.is_enabled() {
-        let replay_result = state.message_queue.replay(&user_id, &handle.sender).await;
-        if replay_result.replayed > 0 || replay_result.expired > 0 {
-            tracing::info!(
-                connection_id = %connection_id,
-                user_id = %user_id,
-                replayed = replay_result.replayed,
-                expired = replay_result.expired,
-                failed = replay_result.failed,
-                "Replayed queued messages on SSE connect"
-            );
+    if state.queue_backend.is_enabled() {
+        match state.queue_backend.drain(&user_id).await {
+            Ok(drain_result) => {
+                let mut replayed = 0;
+                let mut failed = 0;
+
+                for stored_msg in drain_result.messages {
+                    let msg = OutboundMessage::Raw(ServerMessage::Notification {
+                        event: stored_msg.event,
+                    });
+                    match handle.sender.send(msg).await {
+                        Ok(_) => replayed += 1,
+                        Err(_) => failed += 1,
+                    }
+                }
+
+                if replayed > 0 || drain_result.expired > 0 {
+                    tracing::info!(
+                        connection_id = %connection_id,
+                        user_id = %user_id,
+                        replayed = replayed,
+                        expired = drain_result.expired,
+                        failed = failed,
+                        "Replayed queued messages on SSE connect"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    connection_id = %connection_id,
+                    user_id = %user_id,
+                    error = %e,
+                    "Failed to drain message queue for SSE replay"
+                );
+            }
         }
     }
 

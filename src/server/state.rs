@@ -4,11 +4,9 @@ use crate::auth::JwtValidator;
 use crate::cluster::{create_session_store, ClusterRouter, SessionStore};
 use crate::config::Settings;
 use crate::connection_manager::{ConnectionLimits, ConnectionManager};
-use crate::notification::{
-    create_ack_backend, AckConfig, AckTracker, AckTrackerBackend, NotificationDispatcher,
-};
+use crate::notification::{create_ack_backend, AckTrackerBackend, NotificationDispatcher};
 use crate::postgres::PostgresPool;
-use crate::queue::{create_queue_backend, MessageQueueBackend, QueueConfig, UserMessageQueue};
+use crate::queue::{create_queue_backend, MessageQueueBackend};
 use crate::ratelimit::RateLimiter;
 use crate::redis::pool::RedisPool;
 use crate::redis::{CircuitBreaker, CircuitBreakerConfig, RedisHealth};
@@ -21,13 +19,11 @@ pub struct AppState {
     pub jwt_validator: Arc<JwtValidator>,
     pub connection_manager: Arc<ConnectionManager>,
     pub dispatcher: Arc<NotificationDispatcher>,
-    pub message_queue: Arc<UserMessageQueue>,
     pub rate_limiter: Arc<RateLimiter>,
     pub redis_circuit_breaker: Arc<CircuitBreaker>,
     pub redis_health: Arc<RedisHealth>,
     pub redis_pool: Option<Arc<RedisPool>>,
     pub postgres_pool: Option<Arc<PostgresPool>>,
-    pub ack_tracker: Arc<AckTracker>,
     pub template_store: Arc<TemplateStore>,
     pub tenant_manager: Arc<TenantManager>,
     /// Backend for persistent queue storage (memory, Redis, or PostgreSQL)
@@ -122,30 +118,11 @@ impl AppState {
             session_store.clone(),
         ));
 
-        // Create legacy message queue for backward compatibility
-        // (still used by existing code, will be migrated to queue_backend)
-        let queue_config = QueueConfig {
-            enabled: settings.queue.enabled,
-            max_queue_size_per_user: settings.queue.max_size_per_user,
-            message_ttl_seconds: settings.queue.message_ttl_seconds,
-            cleanup_interval_seconds: settings.queue.cleanup_interval_seconds,
-        };
-        let message_queue = Arc::new(UserMessageQueue::new(queue_config));
-
-        // Create legacy ACK tracker for backward compatibility
-        // (still used by existing code, will be migrated to ack_backend)
-        let ack_config = AckConfig {
-            enabled: settings.ack.enabled,
-            timeout_seconds: settings.ack.timeout_seconds,
-            cleanup_interval_seconds: settings.ack.cleanup_interval_seconds,
-        };
-        let ack_tracker = Arc::new(AckTracker::with_config(ack_config));
-
-        // Create dispatcher with message queue and ACK tracker
-        let dispatcher = Arc::new(NotificationDispatcher::with_config(
+        // Create dispatcher with backend abstractions
+        let dispatcher = Arc::new(NotificationDispatcher::with_backends(
             connection_manager.clone(),
-            message_queue.clone(),
-            ack_tracker.clone(),
+            queue_backend.clone(),
+            ack_backend.clone(),
         ));
 
         // Create rate limiter from config
@@ -172,13 +149,11 @@ impl AppState {
             jwt_validator,
             connection_manager,
             dispatcher,
-            message_queue,
             rate_limiter,
             redis_circuit_breaker,
             redis_health,
             redis_pool,
             postgres_pool,
-            ack_tracker,
             template_store,
             tenant_manager,
             queue_backend,
