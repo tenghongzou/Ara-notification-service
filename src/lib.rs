@@ -10,12 +10,18 @@ pub use infrastructure::postgres;
 pub use infrastructure::redis;
 
 // Domain layer (business logic)
+pub mod domain;
+
+// Re-export domain modules for backward compatibility
+pub use domain::ack;
+pub use domain::queue;
+pub use domain::template;
+
+// Domain modules (not yet moved to domain/)
 pub mod cluster;
 pub mod connection_manager;
 pub mod notification;
-pub mod queue;
 pub mod ratelimit;
-pub mod template;
 pub mod tenant;
 
 // Application layer
