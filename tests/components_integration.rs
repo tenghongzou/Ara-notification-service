@@ -13,7 +13,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use ara_notification_service::cluster::{create_session_store, ClusterConfig, ClusterRouter};
-use ara_notification_service::config::{AckConfig as SettingsAckConfig, QueueConfig as SettingsQueueConfig};
+use ara_notification_service::config::{AckSettingsConfig, QueueConfig as SettingsQueueConfig};
 use ara_notification_service::connection_manager::{ConnectionLimits, ConnectionManager};
 use ara_notification_service::notification::{
     create_ack_backend, AckTrackerBackend, NotificationBuilder, NotificationDispatcher,
@@ -40,15 +40,17 @@ fn create_full_test_environment() -> TestEnvironment {
         max_size_per_user: 100,
         message_ttl_seconds: 3600,
         cleanup_interval_seconds: 300,
+        redis_prefix: "".to_string(),
     };
     let queue_backend = create_queue_backend(&queue_config, None, None, None);
 
     // Create ACK backend using factory
-    let ack_config = SettingsAckConfig {
+    let ack_config = AckSettingsConfig {
         enabled: true,
         backend: "memory".to_string(),
         timeout_seconds: 30,
         cleanup_interval_seconds: 60,
+        redis_prefix: "".to_string(),
     };
     let ack_backend = create_ack_backend(&ack_config, None, None, None);
 
@@ -498,6 +500,7 @@ mod queue_tests {
             max_size_per_user: 100,
             message_ttl_seconds: 3600,
             cleanup_interval_seconds: 300,
+            redis_prefix: "".to_string(),
         };
         let queue = create_queue_backend(&config, None, None, None);
 
@@ -515,6 +518,7 @@ mod queue_tests {
             max_size_per_user: 100,
             message_ttl_seconds: 3600,
             cleanup_interval_seconds: 300,
+            redis_prefix: "".to_string(),
         };
         let queue = create_queue_backend(&config, None, None, None);
 
@@ -588,11 +592,12 @@ mod ack_tracker_tests {
 
     #[tokio::test]
     async fn test_ack_disabled() {
-        let config = SettingsAckConfig {
+        let config = AckSettingsConfig {
             enabled: false,
             backend: "memory".to_string(),
             timeout_seconds: 30,
             cleanup_interval_seconds: 60,
+            redis_prefix: "".to_string(),
         };
         let tracker = create_ack_backend(&config, None, None, None);
 
