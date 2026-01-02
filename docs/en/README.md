@@ -82,7 +82,5 @@ Welcome to the Ara Notification Service technical documentation. This documentat
 
 - [繁體中文文件](../zh-TW/README.md)
 - [Project README](../../README.md)
-- [API Specification (Original)](../API.md)
-- [Architecture Document (Original)](../ARCHITECTURE.md)
 - [Changelog](../../CHANGELOG.md)
 
