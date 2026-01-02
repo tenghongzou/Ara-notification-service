@@ -9,7 +9,7 @@ use crate::triggers::{
     send_to_users,
 };
 
-use super::handlers::{health, stats};
+use super::health::{health, stats};
 
 pub fn api_routes() -> Router<AppState> {
     Router::new()
