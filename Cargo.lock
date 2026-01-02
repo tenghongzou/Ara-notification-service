@@ -68,6 +68,7 @@ dependencies = [
  "redis",
  "serde",
  "serde_json",
+ "smallvec",
  "sqlx",
  "thiserror 2.0.17",
  "tokio",

@@ -14,22 +14,22 @@ pub mod domain;
 
 // Re-export domain modules for backward compatibility
 pub use domain::ack;
+pub use domain::cluster;
+pub use domain::connection as connection_manager; // Renamed but re-exported with old name
+pub use domain::notification;
 pub use domain::queue;
+pub use domain::ratelimit;
+pub use domain::realtime::sse;
+pub use domain::realtime::websocket;
 pub use domain::template;
+pub use domain::tenant;
 
-// Domain modules (not yet moved to domain/)
-pub mod cluster;
-pub mod connection_manager;
-pub mod notification;
-pub mod ratelimit;
-pub mod tenant;
+// Re-export triggers for backward compatibility
+pub use domain::notification::triggers;
 
 // Application layer
 pub mod api;
 pub mod server;
-pub mod sse;
-pub mod triggers;
-pub mod websocket;
 
 // Supporting modules
 pub mod shutdown;

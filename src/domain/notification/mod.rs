@@ -1,7 +1,13 @@
-//! Notification types and dispatching.
+//! Notification domain module.
+//!
+//! This module provides notification dispatching and triggers:
+//! - `dispatcher`: Core notification dispatch logic
+//! - `types`: Notification event types and builders
+//! - `triggers`: HTTP and Redis Pub/Sub notification triggers
 
 mod dispatcher;
 mod types;
+pub mod triggers;
 
 pub use dispatcher::{DeliveryResult, NotificationDispatcher};
 pub use types::{

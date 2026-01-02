@@ -9,7 +9,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::metrics::{ACK_EXPIRED_TOTAL, ACK_LATENCY, ACK_RECEIVED_TOTAL, ACK_TRACKED_TOTAL};
-use crate::notification::ack::AckConfig;
+use super::ack::AckConfig;
 
 use super::ack_backend::{AckBackendError, AckBackendStats, AckTrackerBackend, PendingAckInfo};
 

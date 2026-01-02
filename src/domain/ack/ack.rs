@@ -36,13 +36,15 @@ impl Default for AckConfig {
 /// Information about a pending ACK
 #[derive(Debug, Clone)]
 pub struct PendingAck {
-    /// The notification ID
+    /// The notification ID (kept for debugging and future query capabilities)
+    #[allow(dead_code)]
     pub notification_id: Uuid,
     /// The user ID who should acknowledge
     pub user_id: String,
     /// Timestamp when the notification was sent
     pub sent_at: DateTime<Utc>,
-    /// Connection ID that received the notification
+    /// Connection ID that received the notification (kept for debugging and connection correlation)
+    #[allow(dead_code)]
     pub connection_id: Uuid,
 }
 
