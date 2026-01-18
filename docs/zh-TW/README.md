@@ -16,6 +16,7 @@
 | [開發指南](./04-development-guide.md) | 程式碼規範、模組擴展、測試指南 |
 | [進階功能](./05-advanced-features.md) | 離線佇列、ACK 追蹤、多租戶、叢集模式 |
 | [可觀測性](./06-observability.md) | Prometheus 監控、OpenTelemetry 追蹤、日誌 |
+| [單機商業部署與安全](./07-single-node-commercial-secure.md) | 單機商業部署、多租戶、安全範本 |
 
 ---
 
@@ -85,4 +86,3 @@
 - [API 規格 (原始)](../API.md)
 - [架構文件 (原始)](../ARCHITECTURE.md)
 - [變更記錄](../../CHANGELOG.md)
-
