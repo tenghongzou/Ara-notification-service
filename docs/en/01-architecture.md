@@ -82,7 +82,7 @@ src/
 │   └── settings.rs           # Settings struct
 ├── server/                   # HTTP server
 │   ├── mod.rs
-│   ├── router.rs             # Route definitions
+│   ├── app.rs                # Route composition (single entry point)
 │   └── state.rs              # AppState
 ├── auth/                     # Authentication
 │   ├── mod.rs
@@ -131,10 +131,12 @@ src/
 │   └── session_store.rs      # Distributed sessions
 ├── api/                      # REST API
 │   ├── mod.rs
-│   ├── notifications.rs      # Notification endpoints
-│   ├── channels.rs           # Channel endpoints
-│   ├── templates.rs          # Template endpoints
-│   └── stats.rs              # Statistics endpoints
+│   ├── health.rs             # Health and stats handlers
+│   ├── connection.rs         # Channel/subscription query handlers
+│   ├── template.rs           # Template CRUD handlers
+│   ├── tenant.rs             # Tenant query handlers
+│   ├── cluster.rs            # Cluster status handlers
+│   └── metrics.rs            # Prometheus metrics handler
 ├── metrics/                  # Prometheus metrics
 │   └── mod.rs
 ├── telemetry/                # OpenTelemetry
@@ -148,6 +150,8 @@ src/
 └── error/                    # Error handling
     └── mod.rs
 ```
+
+> Single route entrypoint: `src/server/app.rs::create_app()` (composes `/health`, `/metrics`, and `/api/v1/*` routes).
 
 ---
 
@@ -452,4 +456,3 @@ async fn dispatch_batch(&self, notifications: Vec<Notification>) {
 - [Installation & Deployment](./02-installation.md)
 - [API Reference](./03-api-reference.md)
 - [Development Guide](./04-development-guide.md)
-

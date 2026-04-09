@@ -18,6 +18,7 @@ const MAX_BODY_SIZE: usize = 64 * 1024;
 const MAX_BATCH_BODY_SIZE: usize = 1024 * 1024;
 
 pub fn create_app(state: AppState) -> Router {
+    // NOTE: `src/server/app.rs::create_app` is the single entry point for all HTTP route composition.
     // CORS configuration - use configured origins or allow any in development
     let cors = build_cors_layer(&state.settings.server.cors_origins);
 
