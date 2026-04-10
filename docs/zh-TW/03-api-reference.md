@@ -40,11 +40,19 @@ GET /health
 {
   "status": "healthy",
   "version": "1.0.0",
-  "components": {
-    "redis": "connected"
+  "uptime_seconds": 12345,
+  "redis": {
+    "status": "disabled",
+    "connected": false
   }
 }
 ```
+
+**`status` 語義：**
+
+- `healthy`：所有已啟用且必要的依賴皆健康；若 Redis 未啟用（例如 queue/ack 非 redis 且 cluster 關閉），整體仍為 `healthy`。
+- `degraded`：至少一個必要依賴異常（例如已啟用 Redis backend，但 Redis 目前非 `healthy`）。
+- `disabled`（元件層級，如 `redis.status`）：該元件在目前設定下非必要/未啟用，不參與整體健康降級判斷。
 
 ### Prometheus 指標
 
@@ -748,4 +756,3 @@ $redis->publish('notification:channel:orders', json_encode([
 - [安裝與部署](./02-installation.md)
 - [開發指南](./04-development-guide.md)
 - [進階功能](./05-advanced-features.md)
-

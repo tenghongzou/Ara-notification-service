@@ -58,12 +58,12 @@ impl AppState {
             reset_timeout_ms: settings.redis.circuit_breaker_reset_timeout_seconds * 1000,
         };
         let redis_circuit_breaker = Arc::new(CircuitBreaker::with_config(cb_config));
-        let redis_health = Arc::new(RedisHealth::new());
 
         // Create Redis pool if Redis backend is needed for queue, ACK tracking, or cluster mode
-        let needs_redis = settings.queue.backend == "redis"
-            || settings.ack.backend == "redis"
+        let needs_redis = (settings.queue.enabled && settings.queue.backend == "redis")
+            || (settings.ack.enabled && settings.ack.backend == "redis")
             || settings.cluster.enabled;
+        let redis_health = Arc::new(RedisHealth::new_with_enabled(needs_redis));
         let redis_pool = if needs_redis {
             match RedisPool::new(
                 settings.redis.clone(),
@@ -87,7 +87,8 @@ impl AppState {
         };
 
         // Create PostgreSQL pool if PostgreSQL backend is needed for queue or ACK tracking
-        let needs_postgres = settings.queue.backend == "postgres" || settings.ack.backend == "postgres";
+        let needs_postgres =
+            settings.queue.backend == "postgres" || settings.ack.backend == "postgres";
         let postgres_pool = if needs_postgres && !settings.database.url.is_empty() {
             match PostgresPool::new(&settings.database, redis_circuit_breaker.clone()).await {
                 Ok(pool) => {
@@ -107,10 +108,20 @@ impl AppState {
         };
 
         // Create persistent queue backend (memory, Redis, or PostgreSQL)
-        let queue_backend = create_queue_backend(&settings.queue, redis_pool.clone(), postgres_pool.clone(), None);
+        let queue_backend = create_queue_backend(
+            &settings.queue,
+            redis_pool.clone(),
+            postgres_pool.clone(),
+            None,
+        );
 
         // Create persistent ACK backend (memory, Redis, or PostgreSQL)
-        let ack_backend = create_ack_backend(&settings.ack, redis_pool.clone(), postgres_pool.clone(), None);
+        let ack_backend = create_ack_backend(
+            &settings.ack,
+            redis_pool.clone(),
+            postgres_pool.clone(),
+            None,
+        );
 
         // Create session store for cluster mode
         let session_store = create_session_store(&settings.cluster, redis_pool.clone());

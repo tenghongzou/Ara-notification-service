@@ -6,6 +6,7 @@ use super::current_time_ms;
 
 /// Redis connection health status
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum RedisHealthStatus {
     /// Redis is connected and healthy
     Healthy,
@@ -13,6 +14,8 @@ pub enum RedisHealthStatus {
     Reconnecting,
     /// Circuit breaker is open, not attempting connections
     CircuitOpen,
+    /// Redis backend is not required by current runtime configuration
+    Disabled,
 }
 
 impl RedisHealthStatus {
@@ -21,6 +24,7 @@ impl RedisHealthStatus {
             RedisHealthStatus::Healthy => "healthy",
             RedisHealthStatus::Reconnecting => "reconnecting",
             RedisHealthStatus::CircuitOpen => "circuit_open",
+            RedisHealthStatus::Disabled => "disabled",
         }
     }
 }
@@ -35,8 +39,16 @@ pub struct RedisHealth {
 
 impl RedisHealth {
     pub fn new() -> Self {
+        Self::new_with_enabled(true)
+    }
+
+    pub fn new_with_enabled(enabled: bool) -> Self {
         Self {
-            status: AtomicU8::new(RedisHealthStatus::Reconnecting as u8),
+            status: AtomicU8::new(if enabled {
+                RedisHealthStatus::Reconnecting as u8
+            } else {
+                RedisHealthStatus::Disabled as u8
+            }),
             last_connected: AtomicI64::new(0),
             reconnection_attempts: AtomicU32::new(0),
             total_reconnections: AtomicU32::new(0),
@@ -71,13 +83,21 @@ impl RedisHealth {
             .store(RedisHealthStatus::CircuitOpen as u8, Ordering::Release);
     }
 
+    /// Mark Redis as disabled (not configured for active backends)
+    pub fn set_disabled(&self) {
+        self.status
+            .store(RedisHealthStatus::Disabled as u8, Ordering::Release);
+        self.reconnection_attempts.store(0, Ordering::Release);
+    }
+
     /// Get current status
     pub fn status(&self) -> RedisHealthStatus {
         match self.status.load(Ordering::Acquire) {
             0 => RedisHealthStatus::Healthy,
             1 => RedisHealthStatus::Reconnecting,
             2 => RedisHealthStatus::CircuitOpen,
-            _ => RedisHealthStatus::Reconnecting,
+            3 => RedisHealthStatus::Disabled,
+            _ => RedisHealthStatus::Disabled,
         }
     }
 
@@ -128,6 +148,13 @@ mod tests {
 
         health.set_reconnecting();
         assert_eq!(health.status(), RedisHealthStatus::Reconnecting);
+    }
+
+    #[test]
+    fn test_redis_health_disabled_status() {
+        let health = RedisHealth::new_with_enabled(false);
+        assert_eq!(health.status(), RedisHealthStatus::Disabled);
+        assert!(!health.is_healthy());
     }
 
     #[test]
