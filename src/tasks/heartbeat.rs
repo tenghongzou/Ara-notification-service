@@ -4,16 +4,12 @@ use std::time::{Duration, Instant};
 
 use futures::future::join_all;
 use tokio::sync::broadcast;
-use tokio::time::timeout;
 
 use crate::cluster::SessionStore;
 use crate::config::WebSocketConfig;
 use crate::connection_manager::ConnectionManager;
 use crate::metrics::{HeartbeatMetrics, MemoryMetrics};
-use crate::websocket::ServerMessage;
-
-/// Timeout for individual heartbeat send operations
-const HEARTBEAT_SEND_TIMEOUT_MS: u64 = 5000;
+use crate::websocket::{OutboundMessage, ServerMessage};
 
 /// Maximum concurrent heartbeat sends to avoid overwhelming the system
 const MAX_CONCURRENT_HEARTBEATS: usize = 1000;
@@ -92,7 +88,10 @@ impl HeartbeatTask {
         let start = Instant::now();
         let sent = Arc::new(AtomicUsize::new(0));
         let failed = Arc::new(AtomicUsize::new(0));
-        let timed_out = Arc::new(AtomicUsize::new(0));
+
+        // Pre-serialize heartbeat message once to avoid per-connection serialization
+        let heartbeat_msg = OutboundMessage::preserialized(&ServerMessage::Heartbeat)
+            .unwrap_or_else(|_| OutboundMessage::Raw(ServerMessage::Heartbeat));
 
         // Process in batches to avoid overwhelming the system
         for batch in connections.chunks(MAX_CONCURRENT_HEARTBEATS) {
@@ -101,28 +100,20 @@ impl HeartbeatTask {
                 .map(|handle| {
                     let sent = sent.clone();
                     let failed = failed.clone();
-                    let timed_out = timed_out.clone();
                     let handle = handle.clone();
+                    let msg = heartbeat_msg.clone();
 
                     async move {
-                        let send_timeout = Duration::from_millis(HEARTBEAT_SEND_TIMEOUT_MS);
-                        match timeout(send_timeout, handle.send(ServerMessage::Heartbeat)).await {
-                            Ok(Ok(_)) => {
+                        // send_preserialized() already has an internal 5s timeout
+                        match handle.send_preserialized(msg).await {
+                            Ok(_) => {
                                 sent.fetch_add(1, Ordering::Relaxed);
                             }
-                            Ok(Err(_)) => {
+                            Err(_) => {
                                 failed.fetch_add(1, Ordering::Relaxed);
                                 tracing::debug!(
                                     connection_id = %handle.id,
-                                    "Failed to send heartbeat, connection may be dead"
-                                );
-                            }
-                            Err(_) => {
-                                timed_out.fetch_add(1, Ordering::Relaxed);
-                                tracing::debug!(
-                                    connection_id = %handle.id,
-                                    timeout_ms = HEARTBEAT_SEND_TIMEOUT_MS,
-                                    "Heartbeat send timed out"
+                                    "Failed to send heartbeat, connection may be dead or timed out"
                                 );
                             }
                         }
@@ -137,13 +128,9 @@ impl HeartbeatTask {
         let elapsed_ms = start.elapsed().as_millis() as u64;
         let sent_count = sent.load(Ordering::Relaxed);
         let failed_count = failed.load(Ordering::Relaxed);
-        let timed_out_count = timed_out.load(Ordering::Relaxed);
 
         // Record metrics
         HeartbeatMetrics::record_duration_ms(elapsed_ms);
-        if timed_out_count > 0 {
-            HeartbeatMetrics::record_timeouts(timed_out_count as u64);
-        }
 
         // Update memory metrics during heartbeat
         MemoryMetrics::update_process_memory();
@@ -156,7 +143,6 @@ impl HeartbeatTask {
             total = total_count,
             sent = sent_count,
             failed = failed_count,
-            timed_out = timed_out_count,
             elapsed_ms = elapsed_ms,
             "Heartbeat round completed (parallel)"
         );
@@ -277,8 +263,14 @@ mod tests {
             .expect("Should receive heartbeat")
             .expect("Channel should not be closed");
 
-        // Check that we received a heartbeat message
-        assert!(matches!(msg, OutboundMessage::Raw(ServerMessage::Heartbeat)));
+        // Check that we received a heartbeat message (pre-serialized or raw)
+        match &msg {
+            OutboundMessage::Serialized(json) => {
+                assert!(json.contains("heartbeat"), "Pre-serialized heartbeat should contain 'heartbeat'");
+            }
+            OutboundMessage::Raw(ServerMessage::Heartbeat) => {}
+            other => panic!("Expected heartbeat message, got: {:?}", other),
+        }
 
         // Shutdown
         shutdown_tx.send(()).unwrap();

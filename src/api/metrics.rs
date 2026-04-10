@@ -38,11 +38,8 @@ async fn update_metrics_from_state(state: &AppState) {
     metrics::USERS_CONNECTED.set(conn_stats.unique_users as i64);
     metrics::CHANNELS_ACTIVE.set(conn_stats.channels.len() as i64);
 
-    for (channel, count) in &conn_stats.channels {
-        metrics::CHANNEL_SUBSCRIPTIONS
-            .with_label_values(&[channel])
-            .set(*count as i64);
-    }
+    // Per-channel subscription metrics omitted to prevent cross-tenant
+    // channel name leakage. Use /api/v1/channels for tenant-scoped data.
 
     // Redis metrics
     let redis_health = state.redis_health.stats();

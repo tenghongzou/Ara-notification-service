@@ -200,7 +200,7 @@ pub async fn stats(State(state): State<AppState>) -> Json<StatsResponse> {
         connections: ConnectionStats {
             total_connections: conn_stats.total_connections,
             unique_users: conn_stats.unique_users,
-            channels: conn_stats.channels,
+            channels: std::collections::HashMap::new(), // Per-channel details omitted to prevent cross-tenant data leakage; use /api/v1/channels for tenant-scoped data
         },
         notifications: NotificationStats {
             total_sent: dispatcher_stats.total_sent,

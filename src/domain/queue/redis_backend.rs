@@ -213,10 +213,8 @@ impl MessageQueueBackend for RedisQueueBackend {
 
         let key = self.queue_key(user_id);
 
-        // Read all entries and count them
-        let entries = self.pool.xrange_all(&key).await.map_err(Self::map_error)?;
-
-        Ok(entries.len())
+        // Use XLEN for O(1) counting instead of loading all entries
+        self.pool.xlen(&key).await.map_err(Self::map_error)
     }
 
     async fn cleanup_expired(&self) -> Result<usize, QueueBackendError> {

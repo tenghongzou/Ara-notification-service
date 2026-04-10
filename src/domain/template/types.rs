@@ -67,17 +67,19 @@ pub struct Template {
 impl Template {
     /// Validate the template
     pub fn validate(&self) -> TemplateResult<()> {
-        // Validate ID
-        if self.id.is_empty() || self.id.len() > 64 {
+        // Validate ID (up to 130 chars to accommodate tenant-prefixed IDs: "tenant_id:template_id")
+        if self.id.is_empty() || self.id.len() > 130 {
             return Err(TemplateError::InvalidId(
-                "ID must be 1-64 characters".to_string(),
+                "ID must be 1-130 characters".to_string(),
             ));
         }
 
+        // Allow alphanumeric, dash, underscore, and colon (colon is used internally
+        // for tenant-scoped IDs like "tenant_id:template_id")
         if !self
             .id
             .chars()
-            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == ':')
         {
             return Err(TemplateError::InvalidId(
                 "ID must contain only alphanumeric, dash, or underscore".to_string(),

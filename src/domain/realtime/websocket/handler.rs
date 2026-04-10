@@ -64,8 +64,9 @@ pub async fn ws_handler(
 
     tracing::info!(user_id = %claims.sub, "WebSocket upgrade requested");
 
-    // Upgrade to WebSocket
-    ws.on_upgrade(move |socket| handle_socket(socket, state, claims))
+    // Upgrade to WebSocket with message size limits
+    ws.max_message_size(64 * 1024) // 64 KB max message size
+        .on_upgrade(move |socket| handle_socket(socket, state, claims))
 }
 
 /// Extract token from query parameter or Authorization header
@@ -151,9 +152,10 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: Claims) {
         "WebSocket connection established"
     );
 
-    // Replay any queued messages for this user
+    // Replay any queued messages for this user (tenant-scoped key)
+    let queue_key = crate::auth::tenant_scoped_key(&tenant_id, &user_id);
     if state.queue_backend.is_enabled() {
-        match state.queue_backend.drain(&user_id).await {
+        match state.queue_backend.drain(&queue_key).await {
             Ok(drain_result) => {
                 let mut replayed = 0;
                 let mut failed = 0;
@@ -408,6 +410,9 @@ async fn handle_subscribe(
     let mut subscribed = Vec::new();
     let mut errors = Vec::new();
 
+    // Create tenant context for channel namespacing
+    let tenant_ctx = state.tenant_manager.create_context(&handle.tenant_id);
+
     for channel in channels {
         // Validate channel name
         if !is_valid_channel_name(&channel) {
@@ -420,9 +425,12 @@ async fn handle_subscribe(
             continue;
         }
 
+        // Namespace channel for tenant isolation
+        let namespaced = tenant_ctx.namespace_channel(&channel);
+
         match state
             .connection_manager
-            .subscribe_to_channel(handle.id, &channel)
+            .subscribe_to_channel(handle.id, &namespaced)
             .await
         {
             Ok(()) => subscribed.push(channel),
@@ -483,10 +491,15 @@ async fn handle_unsubscribe(
 ) {
     let mut unsubscribed = Vec::new();
 
+    // Create tenant context for channel namespacing
+    let tenant_ctx = state.tenant_manager.create_context(&handle.tenant_id);
+
     for channel in channels {
+        // Namespace channel for tenant isolation (must match subscribe)
+        let namespaced = tenant_ctx.namespace_channel(&channel);
         state
             .connection_manager
-            .unsubscribe_from_channel(handle.id, &channel)
+            .unsubscribe_from_channel(handle.id, &namespaced)
             .await;
         unsubscribed.push(channel);
     }
@@ -519,9 +532,11 @@ fn is_valid_channel_name(name: &str) -> bool {
         return false;
     }
 
-    // Only allow alphanumeric, dash, underscore, dot, and colon
+    // Only allow alphanumeric, dash, underscore, and dot.
+    // Colon is excluded to prevent tenant namespace spoofing
+    // (internal namespaced channels use format "tenant_id:channel").
     name.chars()
-        .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == ':')
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
 }
 
 #[cfg(test)]
@@ -543,6 +558,9 @@ mod tests {
         assert!(!is_valid_channel_name("channel with spaces"));
         assert!(!is_valid_channel_name("channel/path"));
         assert!(!is_valid_channel_name("channel@special"));
+        // Colon is excluded to prevent tenant namespace spoofing
+        assert!(!is_valid_channel_name("tenant:channel"));
+        assert!(!is_valid_channel_name("acme:orders"));
         // Too long
         assert!(!is_valid_channel_name(&"a".repeat(65)));
     }

@@ -137,7 +137,7 @@ impl MessageQueueBackend for PostgresQueueBackend {
 
     async fn drain(&self, user_id: &str) -> Result<DrainResult, QueueBackendError> {
         if !self.config.enabled {
-            return Err(QueueBackendError::Disabled);
+            return Ok(DrainResult::default());
         }
 
         // Fetch and delete all non-expired messages for this user in one query
@@ -225,7 +225,7 @@ impl MessageQueueBackend for PostgresQueueBackend {
 
     async fn peek(&self, user_id: &str, limit: usize) -> Result<Vec<StoredMessage>, QueueBackendError> {
         if !self.config.enabled {
-            return Err(QueueBackendError::Disabled);
+            return Ok(Vec::new());
         }
 
         let rows: Vec<(Uuid, serde_json::Value, chrono::DateTime<Utc>, i32)> = sqlx::query_as(
@@ -272,7 +272,7 @@ impl MessageQueueBackend for PostgresQueueBackend {
 
     async fn queue_size(&self, user_id: &str) -> Result<usize, QueueBackendError> {
         if !self.config.enabled {
-            return Err(QueueBackendError::Disabled);
+            return Ok(0);
         }
 
         let count: i64 = sqlx::query_scalar::<_, i64>(
@@ -317,7 +317,7 @@ impl MessageQueueBackend for PostgresQueueBackend {
 
     async fn clear_user_queue(&self, user_id: &str) -> Result<usize, QueueBackendError> {
         if !self.config.enabled {
-            return Err(QueueBackendError::Disabled);
+            return Ok(0);
         }
 
         let result = sqlx::query(

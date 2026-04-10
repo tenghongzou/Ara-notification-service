@@ -227,6 +227,14 @@ pub trait RedisPoolExt {
     /// Get members with scores less than max.
     async fn zrangebyscore(&self, key: &str, min: f64, max: f64) -> Result<Vec<String>, PoolError>;
 
+    /// Get cardinality of a sorted set (O(1)).
+    async fn zcard(&self, key: &str) -> Result<usize, PoolError>;
+
+    // Stream operations
+
+    /// Get the length of a Redis stream (O(1), much faster than XRANGE for counting).
+    async fn xlen(&self, key: &str) -> Result<usize, PoolError>;
+
     // Key operations
 
     /// Set key expiration.
@@ -416,6 +424,40 @@ impl RedisPoolExt for RedisPool {
         let mut conn = self.get_connection().await?;
 
         match conn.zrangebyscore(key, min, max).await {
+            Ok(result) => {
+                self.circuit_breaker.record_success();
+                Ok(result)
+            }
+            Err(e) => {
+                self.circuit_breaker.record_failure();
+                Err(PoolError::Redis(e))
+            }
+        }
+    }
+
+    async fn zcard(&self, key: &str) -> Result<usize, PoolError> {
+        let mut conn = self.get_connection().await?;
+
+        match conn.zcard(key).await {
+            Ok(result) => {
+                self.circuit_breaker.record_success();
+                Ok(result)
+            }
+            Err(e) => {
+                self.circuit_breaker.record_failure();
+                Err(PoolError::Redis(e))
+            }
+        }
+    }
+
+    async fn xlen(&self, key: &str) -> Result<usize, PoolError> {
+        let mut conn = self.get_connection().await?;
+
+        match redis::cmd("XLEN")
+            .arg(key)
+            .query_async(&mut conn)
+            .await
+        {
             Ok(result) => {
                 self.circuit_breaker.record_success();
                 Ok(result)

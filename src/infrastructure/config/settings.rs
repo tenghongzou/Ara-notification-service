@@ -45,6 +45,9 @@ pub struct Settings {
     pub database: DatabaseConfig,
     #[serde(default)]
     pub cluster: ClusterConfig,
+    /// Whether the service is running in production mode (derived from RUN_MODE env var)
+    #[serde(skip)]
+    pub is_production: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -287,11 +290,21 @@ pub struct ServerConfig {
     pub cors_origins: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct JwtConfig {
     pub secret: String,
     pub issuer: Option<String>,
     pub audience: Option<String>,
+}
+
+impl std::fmt::Debug for JwtConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JwtConfig")
+            .field("secret", &"[REDACTED]")
+            .field("issuer", &self.issuer)
+            .field("audience", &self.audience)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -474,21 +487,20 @@ impl Settings {
             // SERVER_HOST, SERVER_PORT, JWT_SECRET, REDIS_URL, etc.
             .add_source(Environment::default().separator("_").try_parsing(true));
 
-        let settings: Self = builder.build()?.try_deserialize()?;
+        let mut settings: Self = builder.build()?.try_deserialize()?;
+        settings.is_production = run_mode.eq_ignore_ascii_case("production")
+            || run_mode.eq_ignore_ascii_case("prod");
         settings.validate()?;
         Ok(settings)
     }
 
     /// Validate configuration values
     fn validate(&self) -> Result<(), ConfigError> {
-        let run_mode = env::var("RUN_MODE").unwrap_or_else(|_| "development".into());
-        self.validate_with_run_mode(&run_mode)
+        self.validate_with_production_flag(self.is_production)
     }
 
-    fn validate_with_run_mode(&self, run_mode: &str) -> Result<(), ConfigError> {
+    fn validate_with_production_flag(&self, is_production: bool) -> Result<(), ConfigError> {
         let mut errors: Vec<String> = Vec::new();
-        let is_production =
-            run_mode.eq_ignore_ascii_case("production") || run_mode.eq_ignore_ascii_case("prod");
 
         // Validate JWT_SECRET length (minimum 32 characters for security)
         if self.jwt.secret.len() < 32 {
@@ -508,8 +520,8 @@ impl Settings {
                     key.trim().len()
                 )),
                 None => errors.push(format!(
-                    "API_KEY is required when RUN_MODE={} and must be at least {} characters",
-                    run_mode, MIN_API_KEY_LENGTH
+                    "API_KEY is required in production mode and must be at least {} characters",
+                    MIN_API_KEY_LENGTH
                 )),
             }
         }
@@ -578,6 +590,37 @@ impl Settings {
             errors.push("database.pool_size must be greater than 0".to_string());
         }
 
+        // Cross-validate timeout relationships
+        if self.websocket.heartbeat_interval > 0
+            && self.websocket.connection_timeout > 0
+            && self.websocket.connection_timeout <= self.websocket.heartbeat_interval
+        {
+            errors.push(format!(
+                "websocket.connection_timeout ({}) must be greater than heartbeat_interval ({})",
+                self.websocket.connection_timeout, self.websocket.heartbeat_interval
+            ));
+        }
+
+        // Validate cluster session TTL vs heartbeat interval
+        if self.cluster.enabled
+            && self.websocket.heartbeat_interval > 0
+            && self.cluster.session_ttl_seconds > 0
+            && self.cluster.session_ttl_seconds <= self.websocket.heartbeat_interval
+        {
+            errors.push(format!(
+                "cluster.session_ttl_seconds ({}) must be greater than websocket.heartbeat_interval ({})",
+                self.cluster.session_ttl_seconds, self.websocket.heartbeat_interval
+            ));
+        }
+
+        // Validate CORS in production mode
+        if is_production && self.server.cors_origins.is_empty() {
+            errors.push(
+                "CORS_ORIGINS must be configured in production mode (empty origins allows any origin)"
+                    .to_string(),
+            );
+        }
+
         // Return errors if any
         if errors.is_empty() {
             Ok(())
@@ -587,6 +630,14 @@ impl Settings {
                 errors.join("\n  - ")
             )))
         }
+    }
+
+    /// Validate with a run mode string (used by tests)
+    #[cfg(test)]
+    fn validate_with_run_mode(&self, run_mode: &str) -> Result<(), ConfigError> {
+        let is_production =
+            run_mode.eq_ignore_ascii_case("production") || run_mode.eq_ignore_ascii_case("prod");
+        self.validate_with_production_flag(is_production)
     }
 
     pub fn server_addr(&self) -> String {
@@ -703,6 +754,7 @@ mod tests {
             tenant: TenantConfig::default(),
             database: DatabaseConfig::default(),
             cluster: ClusterConfig::default(),
+            is_production: false,
         }
     }
 
@@ -820,6 +872,7 @@ mod tests {
     fn test_validate_production_accepts_valid_api_key() {
         let mut settings = create_test_settings();
         settings.api.key = Some("prod-api-key-1234567890".to_string());
+        settings.server.cors_origins = vec!["https://example.com".to_string()];
 
         let result = settings.validate_with_run_mode("production");
         assert!(result.is_ok());
@@ -829,6 +882,7 @@ mod tests {
     fn test_validate_production_rejects_short_api_key() {
         let mut settings = create_test_settings();
         settings.api.key = Some("short-key".to_string());
+        settings.server.cors_origins = vec!["https://example.com".to_string()];
 
         let result = settings.validate_with_run_mode("production");
         assert!(result.is_err());

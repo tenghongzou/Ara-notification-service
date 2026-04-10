@@ -17,8 +17,8 @@ pub struct RedisSessionStore {
     server_id: String,
     pool: Arc<RedisPool>,
     config: ClusterConfig,
-    /// Local cache of connection IDs for this server (for refresh)
-    local_connections: dashmap::DashSet<Uuid>,
+    /// Local cache of connection IDs to user IDs for this server (for refresh and SREM checks)
+    local_connections: dashmap::DashMap<Uuid, String>,
 }
 
 impl RedisSessionStore {
@@ -27,7 +27,7 @@ impl RedisSessionStore {
             server_id: config.server_id.clone(),
             pool,
             config,
-            local_connections: dashmap::DashSet::new(),
+            local_connections: dashmap::DashMap::new(),
         }
     }
 
@@ -54,6 +54,37 @@ impl RedisSessionStore {
     /// Generate Redis key for all users set
     fn all_users_key(&self) -> String {
         format!("{}:users", self.config.session_prefix)
+    }
+
+    /// Scan Redis keys matching a pattern using SCAN (non-blocking alternative to KEYS)
+    async fn scan_keys(
+        &self,
+        conn: &mut redis::aio::MultiplexedConnection,
+        pattern: &str,
+    ) -> Result<Vec<String>, SessionStoreError> {
+        let mut keys = Vec::new();
+        let mut cursor: u64 = 0;
+
+        loop {
+            let (next_cursor, batch): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(pattern)
+                .arg("COUNT")
+                .arg(100)
+                .query_async(conn)
+                .await
+                .map_err(|e| SessionStoreError::RedisError(e.to_string()))?;
+
+            keys.extend(batch);
+            cursor = next_cursor;
+
+            if cursor == 0 {
+                break;
+            }
+        }
+
+        Ok(keys)
     }
 }
 
@@ -97,10 +128,13 @@ impl SessionStore for RedisSessionStore {
             .cmd("EXPIRE")
             .arg(&self.user_servers_key(&session.user_id))
             .arg(ttl)
-            // Add user to global users set
+            // Add user to global users set (with TTL to prevent unbounded growth)
             .cmd("SADD")
             .arg(&self.all_users_key())
             .arg(&session.user_id)
+            .cmd("EXPIRE")
+            .arg(&self.all_users_key())
+            .arg(ttl * 2) // 2x session TTL to allow for refresh cycles
             // Increment server connection count
             .cmd("INCR")
             .arg(&self.server_connections_key(&self.server_id))
@@ -112,8 +146,9 @@ impl SessionStore for RedisSessionStore {
             .await
             .map_err(|e| SessionStoreError::RedisError(e.to_string()))?;
 
-        // Track locally for refresh
-        self.local_connections.insert(session.connection_id);
+        // Track locally for refresh and SREM checks
+        self.local_connections
+            .insert(session.connection_id, session.user_id.clone());
 
         tracing::debug!(
             connection_id = %session.connection_id,
@@ -142,18 +177,33 @@ impl SessionStore for RedisSessionStore {
 
         if let Some(json) = session_json {
             if let Ok(session) = serde_json::from_str::<SessionInfo>(&json) {
-                // Remove session and update indices
-                let _: () = redis::pipe()
-                    // Delete session data
-                    .cmd("DEL")
-                    .arg(&session_key)
-                    // Remove server from user's server set (if no other connections from this server)
-                    .cmd("SREM")
-                    .arg(&self.user_servers_key(&session.user_id))
-                    .arg(&self.server_id)
-                    // Decrement server connection count
-                    .cmd("DECR")
-                    .arg(&self.server_connections_key(&self.server_id))
+                // Check if this server still has other connections for the same user
+                let user_has_other_connections = self.local_connections.iter().any(|entry| {
+                    *entry.key() != connection_id && *entry.value() == session.user_id
+                });
+
+                // Build pipeline: always delete session and decrement count
+                let mut pipe = redis::pipe();
+                pipe.cmd("DEL").arg(&session_key);
+                pipe.cmd("DECR")
+                    .arg(&self.server_connections_key(&self.server_id));
+
+                // Only SREM server from user set if no other connections for this user on this server
+                // Note: This is a best-effort check using local_connections count.
+                // For a precise check we'd need to verify user_id for each remaining connection,
+                // but that would require additional Redis lookups. We err on the side of keeping
+                // the mapping (avoiding false removal) by only removing when local_connections is empty.
+                if !user_has_other_connections {
+                    pipe.cmd("SREM")
+                        .arg(&self.user_servers_key(&session.user_id))
+                        .arg(&self.server_id);
+                    // Note: We do NOT remove from all_users_key here because the user
+                    // may still be connected on other servers. The global user set is
+                    // maintained via TTL on the user_servers_key entries -- when all
+                    // servers' entries expire, the user is effectively gone.
+                }
+
+                let _: () = pipe
                     .query_async(&mut conn)
                     .await
                     .map_err(|e| SessionStoreError::RedisError(e.to_string()))?;
@@ -249,8 +299,9 @@ impl SessionStore for RedisSessionStore {
         let mut refreshed = 0;
 
         // Refresh all local connections
-        for connection_id in self.local_connections.iter() {
-            let session_key = self.session_key(*connection_id);
+        for entry in self.local_connections.iter() {
+            let connection_id = *entry.key();
+            let session_key = self.session_key(connection_id);
 
             // Refresh TTL
             let result: i32 = conn
@@ -262,7 +313,7 @@ impl SessionStore for RedisSessionStore {
                 refreshed += 1;
             } else {
                 // Session expired or doesn't exist, remove from local tracking
-                self.local_connections.remove(&*connection_id);
+                self.local_connections.remove(&connection_id);
             }
         }
 
@@ -350,11 +401,7 @@ impl SessionStore for RedisSessionStore {
 
         // Get all server keys and sum their connection counts
         let pattern = format!("{}:server:*", self.config.session_prefix);
-        let keys: Vec<String> = redis::cmd("KEYS")
-            .arg(&pattern)
-            .query_async(&mut conn)
-            .await
-            .map_err(|e| SessionStoreError::RedisError(e.to_string()))?;
+        let keys = self.scan_keys(&mut conn, &pattern).await?;
 
         if keys.is_empty() {
             return Ok(0);
@@ -394,13 +441,9 @@ impl SessionStore for RedisSessionStore {
             SessionStoreError::RedisError(format!("Failed to get connection: {}", e))
         })?;
 
-        // Get all session keys
+        // Get all session keys using SCAN (non-blocking)
         let pattern = format!("{}:conn:*", self.config.session_prefix);
-        let keys: Vec<String> = redis::cmd("KEYS")
-            .arg(&pattern)
-            .query_async(&mut conn)
-            .await
-            .map_err(|e| SessionStoreError::RedisError(e.to_string()))?;
+        let keys = self.scan_keys(&mut conn, &pattern).await?;
 
         if keys.is_empty() {
             return Ok(vec![]);
@@ -431,13 +474,9 @@ impl SessionStore for RedisSessionStore {
             SessionStoreError::RedisError(format!("Failed to get connection: {}", e))
         })?;
 
-        // Get all session keys
+        // Get all session keys using SCAN (non-blocking)
         let pattern = format!("{}:conn:*", self.config.session_prefix);
-        let keys: Vec<String> = redis::cmd("KEYS")
-            .arg(&pattern)
-            .query_async(&mut conn)
-            .await
-            .map_err(|e| SessionStoreError::RedisError(e.to_string()))?;
+        let keys = self.scan_keys(&mut conn, &pattern).await?;
 
         if keys.is_empty() {
             return Ok(vec![]);

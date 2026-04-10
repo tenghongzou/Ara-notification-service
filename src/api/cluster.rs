@@ -2,10 +2,11 @@
 
 use axum::{
     extract::{Path, State},
-    Json,
+    Extension, Json,
 };
 use serde::Serialize;
 
+use crate::server::middleware::RequestTenantContext;
 use crate::server::AppState;
 
 #[derive(Debug, Serialize)]
@@ -85,11 +86,20 @@ pub struct UserSessionInfo {
 #[tracing::instrument(name = "http.cluster_user_location", skip(state))]
 pub async fn cluster_user_location(
     State(state): State<AppState>,
+    tenant_ctx: Option<Extension<RequestTenantContext>>,
     Path(user_id): Path<String>,
 ) -> Json<UserLocationResponse> {
     if !state.session_store.is_enabled() {
         let connections = state.connection_manager.get_user_connections(&user_id);
-        let sessions: Vec<UserSessionInfo> = connections.iter().map(|c| UserSessionInfo {
+        // Filter connections by tenant when multi-tenancy is enabled
+        let filtered: Vec<_> = match tenant_ctx.as_ref() {
+            Some(t) => {
+                let tid = t.0.tenant_id();
+                connections.into_iter().filter(|c| c.tenant_id == tid).collect()
+            }
+            None => connections,
+        };
+        let sessions: Vec<UserSessionInfo> = filtered.iter().map(|c| UserSessionInfo {
             connection_id: c.id.to_string(),
             server_id: state.session_store.server_id().to_string(),
             connected_at: c.connected_at.timestamp(),
@@ -105,7 +115,15 @@ pub async fn cluster_user_location(
 
     match state.session_store.get_user_sessions(&user_id).await {
         Ok(sessions) => {
-            let session_infos: Vec<UserSessionInfo> = sessions.iter().map(|s| UserSessionInfo {
+            // Filter sessions by tenant when multi-tenancy is enabled
+            let filtered: Vec<_> = match tenant_ctx.as_ref() {
+                Some(t) => {
+                    let tid = t.0.tenant_id();
+                    sessions.into_iter().filter(|s| s.tenant_id == tid).collect()
+                }
+                None => sessions,
+            };
+            let session_infos: Vec<UserSessionInfo> = filtered.iter().map(|s| UserSessionInfo {
                 connection_id: s.connection_id.to_string(),
                 server_id: s.server_id.clone(),
                 connected_at: s.connected_at,

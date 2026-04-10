@@ -3,10 +3,15 @@
 use chrono::{DateTime, Utc};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::time::Duration;
 use tokio::sync::{mpsc, RwLock};
 use uuid::Uuid;
 
 use crate::websocket::{OutboundMessage, ServerMessage};
+
+/// Timeout for sending messages to a connection's channel.
+/// Prevents indefinite blocking when a consumer is slow or stalled.
+const SEND_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Handle for a single WebSocket connection
 pub struct ConnectionHandle {
@@ -51,20 +56,31 @@ impl ConnectionHandle {
             .unwrap_or_else(Utc::now)
     }
 
-    /// Send a ServerMessage (will be serialized when sent to WebSocket)
+    /// Send a ServerMessage (will be serialized when sent to WebSocket).
+    /// Times out after SEND_TIMEOUT to prevent blocking on stalled consumers.
     pub async fn send(
         &self,
         message: ServerMessage,
     ) -> Result<(), mpsc::error::SendError<OutboundMessage>> {
-        self.sender.send(OutboundMessage::Raw(message)).await
+        let msg = OutboundMessage::Raw(message);
+        tokio::time::timeout(SEND_TIMEOUT, self.sender.send(msg))
+            .await
+            .unwrap_or(Err(mpsc::error::SendError(OutboundMessage::Raw(
+                ServerMessage::Heartbeat,
+            ))))
     }
 
-    /// Send a pre-serialized message (for efficient multi-send scenarios)
+    /// Send a pre-serialized message (for efficient multi-send scenarios).
+    /// Times out after SEND_TIMEOUT to prevent blocking on stalled consumers.
     pub async fn send_preserialized(
         &self,
         message: OutboundMessage,
     ) -> Result<(), mpsc::error::SendError<OutboundMessage>> {
-        self.sender.send(message).await
+        tokio::time::timeout(SEND_TIMEOUT, self.sender.send(message))
+            .await
+            .unwrap_or(Err(mpsc::error::SendError(OutboundMessage::Raw(
+                ServerMessage::Heartbeat,
+            ))))
     }
 
     /// Check if user has a specific role

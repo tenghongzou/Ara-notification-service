@@ -32,9 +32,12 @@ impl ClusterRouter {
         }
     }
 
-    /// Check if a user is connected locally
-    pub fn is_user_local(&self, user_id: &str) -> bool {
-        !self.connection_manager.get_user_connections(user_id).is_empty()
+    /// Check if a user is connected locally (filtered by tenant)
+    pub fn is_user_local(&self, user_id: &str, tenant_id: &str) -> bool {
+        self.connection_manager
+            .get_user_connections(user_id)
+            .iter()
+            .any(|c| c.tenant_id == tenant_id)
     }
 
     /// Route a message to a user across the cluster
@@ -46,8 +49,13 @@ impl ClusterRouter {
         tenant_id: &str,
         message: ServerMessage,
     ) -> Result<RouteResult, SessionStoreError> {
-        // First, try local delivery
-        let local_connections = self.connection_manager.get_user_connections(user_id);
+        // First, try local delivery (filtered by tenant)
+        let local_connections: Vec<_> = self
+            .connection_manager
+            .get_user_connections(user_id)
+            .into_iter()
+            .filter(|c| c.tenant_id == tenant_id)
+            .collect();
 
         let mut local_delivered = 0;
         if !local_connections.is_empty() {
@@ -142,8 +150,13 @@ impl ClusterRouter {
             }
         };
 
-        // Deliver locally
-        let connections = self.connection_manager.get_user_connections(&message.user_id);
+        // Deliver locally (filtered by tenant)
+        let connections: Vec<_> = self
+            .connection_manager
+            .get_user_connections(&message.user_id)
+            .into_iter()
+            .filter(|c| c.tenant_id == message.tenant_id)
+            .collect();
         let mut delivered = 0;
 
         let outbound = OutboundMessage::Raw(server_message);
@@ -373,7 +386,7 @@ mod tests {
         let (connection_manager, session_store) = create_test_components();
         let router = ClusterRouter::new(connection_manager, session_store);
 
-        assert!(!router.is_user_local("nonexistent-user"));
+        assert!(!router.is_user_local("nonexistent-user", "default"));
     }
 
     #[tokio::test]

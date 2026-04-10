@@ -624,7 +624,7 @@ mod cluster_integration_tests {
         let env = create_full_test_environment();
 
         // Verify router can access connection manager
-        let is_local = env.cluster_router.is_user_local("test-user");
+        let is_local = env.cluster_router.is_user_local("test-user", "default");
         assert!(!is_local); // No connections registered
     }
 
@@ -845,7 +845,7 @@ mod concurrency_tests {
             handles.push(tokio::spawn(async move {
                 for j in 0..50 {
                     let user = format!("user-{}-{}", i, j);
-                    let _ = r.is_user_local(&user);
+                    let _ = r.is_user_local(&user, "default");
                     cnt.fetch_add(1, Ordering::SeqCst);
                 }
             }));

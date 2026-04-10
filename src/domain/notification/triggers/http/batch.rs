@@ -2,13 +2,14 @@
 
 use std::collections::HashSet;
 
-use axum::{extract::State, Json};
+use axum::{extract::State, Extension, Json};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::{AppError, Result};
 use crate::notification::{NotificationBuilder, NotificationTarget, Priority};
+use crate::server::middleware::RequestTenantContext;
 use crate::server::AppState;
 
 use super::content::NotificationContent;
@@ -40,14 +41,28 @@ pub enum BatchTarget {
 }
 
 impl BatchTarget {
-    /// Convert to NotificationTarget
-    fn into_notification_target(self) -> NotificationTarget {
+    /// Convert to NotificationTarget, applying tenant channel namespacing if provided
+    fn into_notification_target(
+        self,
+        tenant_ctx: Option<&RequestTenantContext>,
+    ) -> NotificationTarget {
         match self {
             BatchTarget::User(id) => NotificationTarget::User(id),
             BatchTarget::Users(ids) => NotificationTarget::Users(ids),
             BatchTarget::Broadcast => NotificationTarget::Broadcast,
-            BatchTarget::Channel(name) => NotificationTarget::Channel(name),
-            BatchTarget::Channels(names) => NotificationTarget::Channels(names),
+            BatchTarget::Channel(name) => {
+                let namespaced = tenant_ctx
+                    .map(|t| t.namespace_channel(&name))
+                    .unwrap_or(name);
+                NotificationTarget::Channel(namespaced)
+            }
+            BatchTarget::Channels(names) => {
+                let namespaced = match tenant_ctx {
+                    Some(t) => names.iter().map(|n| t.namespace_channel(n)).collect(),
+                    None => names,
+                };
+                NotificationTarget::Channels(namespaced)
+            }
         }
     }
 
@@ -176,8 +191,12 @@ pub struct BatchSendResponse {
 )]
 pub async fn batch_send(
     State(state): State<AppState>,
+    tenant_ctx: Option<Extension<RequestTenantContext>>,
     Json(request): Json<BatchSendRequest>,
 ) -> Result<Json<BatchSendResponse>> {
+    let tenant_ref = tenant_ctx.as_ref().map(|t| &t.0);
+    let tenant_id = tenant_ref.map(|t| t.tenant_id());
+
     let batch_id = Uuid::new_v4();
     let total = request.notifications.len();
 
@@ -206,7 +225,7 @@ pub async fn batch_send(
         // Resolve content (from template or direct)
         let resolved = match item
             .content
-            .resolve(&state.template_store, item.priority, item.ttl)
+            .resolve_for_tenant(&state.template_store, tenant_id, item.priority, item.ttl)
         {
             Ok(r) => r,
             Err(e) => {
@@ -260,10 +279,13 @@ pub async fn batch_send(
         }
 
         let event = builder.build();
-        let target = item.target.into_notification_target();
+        let target = item.target.into_notification_target(tenant_ref);
 
-        // Dispatch notification
-        let result = state.dispatcher.dispatch(target, event).await;
+        // Dispatch notification with tenant scoping
+        let result = state
+            .dispatcher
+            .dispatch_for_tenant(target, event, tenant_id)
+            .await;
 
         let item_success = result.success;
         total_delivered += result.delivered_to;
@@ -360,14 +382,14 @@ mod tests {
     #[test]
     fn test_batch_target_into_notification_target() {
         let target = BatchTarget::User("user-123".to_string());
-        let notification_target = target.into_notification_target();
+        let notification_target = target.into_notification_target(None);
         match notification_target {
             NotificationTarget::User(id) => assert_eq!(id, "user-123"),
             _ => panic!("Expected User target"),
         }
 
         let target = BatchTarget::Broadcast;
-        let notification_target = target.into_notification_target();
+        let notification_target = target.into_notification_target(None);
         match notification_target {
             NotificationTarget::Broadcast => {}
             _ => panic!("Expected Broadcast target"),

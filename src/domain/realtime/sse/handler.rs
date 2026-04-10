@@ -105,9 +105,29 @@ pub async fn sse_handler(
         "SSE connection established"
     );
 
-    // Replay any queued messages for this user
+    // Register session in cluster store for cross-server routing
+    if state.session_store.is_enabled() {
+        let session_info = crate::cluster::SessionInfo {
+            connection_id,
+            user_id: user_id.clone(),
+            tenant_id: tenant_id.clone(),
+            server_id: state.session_store.server_id().to_string(),
+            connected_at: chrono::Utc::now().timestamp(),
+            channels: vec![],
+        };
+        if let Err(e) = state.session_store.register_session(&session_info).await {
+            tracing::warn!(
+                connection_id = %connection_id,
+                error = %e,
+                "Failed to register SSE session in cluster store"
+            );
+        }
+    }
+
+    // Replay any queued messages for this user (tenant-scoped key)
+    let queue_key = crate::auth::tenant_scoped_key(&tenant_id, &user_id);
     if state.queue_backend.is_enabled() {
-        match state.queue_backend.drain(&user_id).await {
+        match state.queue_backend.drain(&queue_key).await {
             Ok(drain_result) => {
                 let mut replayed = 0;
                 let mut failed = 0;
@@ -282,9 +302,20 @@ impl Drop for CleanupGuard {
 
         // Spawn a task to unregister the connection (async operation)
         let connection_manager = self.state.connection_manager.clone();
+        let session_store = self.state.session_store.clone();
         let connection_id = self.connection_id;
         tokio::spawn(async move {
             connection_manager.unregister(connection_id).await;
+            // Unregister from cluster store
+            if session_store.is_enabled() {
+                if let Err(e) = session_store.unregister_session(connection_id).await {
+                    tracing::warn!(
+                        connection_id = %connection_id,
+                        error = %e,
+                        "Failed to unregister SSE session from cluster store"
+                    );
+                }
+            }
         });
     }
 }

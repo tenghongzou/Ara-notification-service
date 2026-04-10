@@ -18,8 +18,8 @@ pub use helpers::{
 use lazy_static::lazy_static;
 use prometheus::{
     register_histogram, register_histogram_vec, register_int_counter, register_int_counter_vec,
-    register_int_gauge, register_int_gauge_vec, Histogram, HistogramVec, IntCounter, IntCounterVec,
-    IntGauge, IntGaugeVec,
+    register_int_gauge, Histogram, HistogramVec, IntCounter, IntCounterVec,
+    IntGauge,
 };
 
 /// Prefix for all metrics
@@ -47,13 +47,6 @@ lazy_static! {
         format!("{}_connections_per_user", METRIC_PREFIX),
         "Distribution of connections per user",
         vec![1.0, 2.0, 3.0, 4.0, 5.0, 10.0]
-    ).unwrap();
-
-    /// Number of active channel subscriptions
-    pub static ref CHANNEL_SUBSCRIPTIONS: IntGaugeVec = register_int_gauge_vec!(
-        format!("{}_channel_subscriptions", METRIC_PREFIX),
-        "Number of subscriptions per channel",
-        &["channel"]
     ).unwrap();
 
     /// Total channels with subscribers

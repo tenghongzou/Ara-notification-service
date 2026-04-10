@@ -189,7 +189,7 @@ mod router_tests {
         let router = ClusterRouter::new(connection_manager, session_store);
 
         // Router should be created successfully
-        assert!(!router.is_user_local("nonexistent-user"));
+        assert!(!router.is_user_local("nonexistent-user", "default"));
     }
 
     #[test]
@@ -198,8 +198,8 @@ mod router_tests {
         let router = ClusterRouter::new(connection_manager, session_store);
 
         // Non-existent user should not be local
-        assert!(!router.is_user_local("user-1"));
-        assert!(!router.is_user_local(""));
+        assert!(!router.is_user_local("user-1", "default"));
+        assert!(!router.is_user_local("", "default"));
     }
 
     #[tokio::test]
@@ -541,7 +541,7 @@ mod cross_component_tests {
         ));
 
         // Verify initial state
-        assert!(!router.is_user_local("user-1"));
+        assert!(!router.is_user_local("user-1", "default"));
 
         // Route to non-existent user
         let message = ara_notification_service::websocket::ServerMessage::Heartbeat;
@@ -575,8 +575,8 @@ mod cross_component_tests {
         assert_eq!(ss2.server_id(), "server-2");
 
         // Neither should have local users
-        assert!(!router1.is_user_local("user-1"));
-        assert!(!router2.is_user_local("user-1"));
+        assert!(!router1.is_user_local("user-1", "default"));
+        assert!(!router2.is_user_local("user-1", "default"));
     }
 
     /// Test session store backend selection
@@ -706,7 +706,7 @@ mod concurrency_tests {
             handles.push(tokio::spawn(async move {
                 // Each task performs multiple operations
                 for _ in 0..100 {
-                    let _ = router_clone.is_user_local(&user_id);
+                    let _ = router_clone.is_user_local(&user_id, "default");
                     let message = ara_notification_service::websocket::ServerMessage::Heartbeat;
                     let _ = router_clone
                         .route_to_user(&user_id, "tenant-1", message)

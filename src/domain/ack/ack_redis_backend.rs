@@ -371,9 +371,9 @@ impl AckTrackerBackend for RedisAckBackend {
     async fn pending_count(&self) -> usize {
         let timeout_key = self.timeout_key();
 
-        // Use ZCARD to count pending ACKs (efficient O(1) operation)
-        match self.pool.zrangebyscore(&timeout_key, f64::MIN, f64::MAX).await {
-            Ok(members) => members.len(),
+        // Use ZCARD for O(1) cardinality count instead of loading all members
+        match self.pool.zcard(&timeout_key).await {
+            Ok(count) => count,
             Err(e) => {
                 tracing::debug!(
                     error = %Self::map_error(e),

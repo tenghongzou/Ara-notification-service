@@ -158,6 +158,17 @@ impl NotificationDispatcher {
         )
     )]
     pub async fn dispatch(&self, target: NotificationTarget, event: NotificationEvent) -> DeliveryResult {
+        self.dispatch_for_tenant(target, event, None).await
+    }
+
+    /// Dispatch a notification scoped to a specific tenant.
+    /// When tenant_id is Some, broadcast and user lookups are filtered to that tenant.
+    pub async fn dispatch_for_tenant(
+        &self,
+        target: NotificationTarget,
+        event: NotificationEvent,
+        tenant_id: Option<&str>,
+    ) -> DeliveryResult {
         // Skip expired notifications
         if event.is_expired() {
             tracing::debug!(
@@ -168,9 +179,9 @@ impl NotificationDispatcher {
         }
 
         match target {
-            NotificationTarget::User(user_id) => self.send_to_user(&user_id, event).await,
-            NotificationTarget::Users(user_ids) => self.send_to_users(&user_ids, event).await,
-            NotificationTarget::Broadcast => self.broadcast(event).await,
+            NotificationTarget::User(user_id) => self.send_to_user_for_tenant(&user_id, event, tenant_id).await,
+            NotificationTarget::Users(user_ids) => self.send_to_users_for_tenant(&user_ids, event, tenant_id).await,
+            NotificationTarget::Broadcast => self.broadcast_for_tenant(event, tenant_id).await,
             NotificationTarget::Channel(channel) => self.send_to_channel(&channel, event).await,
             NotificationTarget::Channels(channels) => self.send_to_channels(&channels, event).await,
         }
@@ -184,14 +195,25 @@ impl NotificationDispatcher {
         fields(notification_id = %event.id, event_type = %event.event_type)
     )]
     pub async fn send_to_user(&self, user_id: &str, event: NotificationEvent) -> DeliveryResult {
+        self.send_to_user_for_tenant(user_id, event, None).await
+    }
+
+    /// Send notification to a specific user, filtered by tenant
+    async fn send_to_user_for_tenant(
+        &self,
+        user_id: &str,
+        event: NotificationEvent,
+        tenant_id: Option<&str>,
+    ) -> DeliveryResult {
         let notification_id = event.id;
-        let connections = self.connection_manager.get_user_connections(user_id);
+        let connections = self.get_user_connections_filtered(user_id, tenant_id);
 
         // If user has no connections and queue is enabled, queue the message
         if connections.is_empty() {
             if let Some(ref queue) = self.queue_backend {
                 if queue.is_enabled() {
-                    match queue.enqueue(user_id, event.clone()).await {
+                    let queue_key = Self::tenant_queue_key(tenant_id, user_id);
+                    match queue.enqueue(&queue_key, event.clone()).await {
                         Ok(()) => {
                             tracing::debug!(
                                 user_id = %user_id,
@@ -254,6 +276,16 @@ impl NotificationDispatcher {
         )
     )]
     pub async fn send_to_users(&self, user_ids: &[String], event: NotificationEvent) -> DeliveryResult {
+        self.send_to_users_for_tenant(user_ids, event, None).await
+    }
+
+    /// Send notification to multiple users, filtered by tenant
+    async fn send_to_users_for_tenant(
+        &self,
+        user_ids: &[String],
+        event: NotificationEvent,
+        tenant_id: Option<&str>,
+    ) -> DeliveryResult {
         let notification_id = event.id;
         let message = ServerMessage::Notification { event: event.clone() };
 
@@ -268,7 +300,7 @@ impl NotificationDispatcher {
             let mut offline_users: Vec<&str> = Vec::new();
 
             for user_id in batch {
-                let connections = self.connection_manager.get_user_connections(user_id);
+                let connections = self.get_user_connections_filtered(user_id, tenant_id);
                 if connections.is_empty() {
                     offline_users.push(user_id);
                 } else {
@@ -281,7 +313,8 @@ impl NotificationDispatcher {
                 if let Some(ref queue) = self.queue_backend {
                     if queue.is_enabled() {
                         for user_id in offline_users {
-                            if queue.enqueue(user_id, event.clone()).await.is_ok() {
+                            let queue_key = Self::tenant_queue_key(tenant_id, user_id);
+                            if queue.enqueue(&queue_key, event.clone()).await.is_ok() {
                                 queued_count += 1;
                             }
                         }
@@ -327,8 +360,21 @@ impl NotificationDispatcher {
         fields(notification_id = %event.id, event_type = %event.event_type)
     )]
     pub async fn broadcast(&self, event: NotificationEvent) -> DeliveryResult {
+        self.broadcast_for_tenant(event, None).await
+    }
+
+    /// Broadcast notification filtered by tenant.
+    /// When tenant_id is Some, only connections belonging to that tenant receive the broadcast.
+    async fn broadcast_for_tenant(
+        &self,
+        event: NotificationEvent,
+        tenant_id: Option<&str>,
+    ) -> DeliveryResult {
         let notification_id = event.id;
-        let connections = self.connection_manager.get_all_connections();
+        let connections = match tenant_id {
+            Some(tid) => self.connection_manager.get_tenant_connections(tid),
+            None => self.connection_manager.get_all_connections(),
+        };
         let message = ServerMessage::Notification { event };
 
         let (delivered, failed) = self.send_to_connections(&connections, &message, Some(notification_id)).await;
@@ -437,6 +483,30 @@ impl NotificationDispatcher {
         );
 
         DeliveryResult::new(notification_id, delivered, failed)
+    }
+
+    /// Build a queue key that includes tenant scope when provided.
+    fn tenant_queue_key(tenant_id: Option<&str>, user_id: &str) -> String {
+        crate::auth::tenant_scoped_key(
+            tenant_id.unwrap_or(crate::auth::DEFAULT_TENANT_ID),
+            user_id,
+        )
+    }
+
+    /// Get user connections optionally filtered by tenant_id
+    fn get_user_connections_filtered(
+        &self,
+        user_id: &str,
+        tenant_id: Option<&str>,
+    ) -> Vec<Arc<ConnectionHandle>> {
+        let connections = self.connection_manager.get_user_connections(user_id);
+        match tenant_id {
+            Some(tid) => connections
+                .into_iter()
+                .filter(|c| c.tenant_id == tid)
+                .collect(),
+            None => connections,
+        }
     }
 
     /// Send message to a list of connections concurrently

@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use anyhow::{bail, Result};
+
 use crate::auth::JwtValidator;
 use crate::cluster::{create_session_store, ClusterRouter, SessionStore};
 use crate::config::Settings;
@@ -40,7 +42,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub async fn new(settings: Settings) -> Self {
+    pub async fn new(settings: Settings) -> Result<Self> {
         let jwt_validator = Arc::new(JwtValidator::new(&settings.jwt));
 
         // Create connection manager with limits from config
@@ -75,6 +77,12 @@ impl AppState {
                     Some(Arc::new(pool))
                 }
                 Err(e) => {
+                    if settings.is_production {
+                        bail!(
+                            "Redis pool creation failed in production mode (required by configured backends): {}",
+                            e
+                        );
+                    }
                     tracing::error!(
                         error = %e,
                         "Failed to create Redis pool, falling back to memory backends"
@@ -96,6 +104,12 @@ impl AppState {
                     Some(Arc::new(pool))
                 }
                 Err(e) => {
+                    if settings.is_production {
+                        bail!(
+                            "PostgreSQL pool creation failed in production mode (required by configured backends): {}",
+                            e
+                        );
+                    }
                     tracing::error!(
                         error = %e,
                         "Failed to create PostgreSQL pool, falling back to memory backends"
@@ -158,7 +172,7 @@ impl AppState {
         // Create tenant manager
         let tenant_manager = Arc::new(TenantManager::new(settings.tenant.clone()));
 
-        Self {
+        Ok(Self {
             settings: Arc::new(settings),
             jwt_validator,
             connection_manager,
@@ -175,6 +189,6 @@ impl AppState {
             session_store,
             cluster_router,
             start_time: Instant::now(),
-        }
+        })
     }
 }

@@ -4,6 +4,16 @@ use std::collections::HashMap;
 /// Default tenant ID when multi-tenancy is disabled or tenant_id is not provided
 pub const DEFAULT_TENANT_ID: &str = "default";
 
+/// Build a queue key that includes tenant scope.
+/// Non-default tenants get `{tenant_id}:{user_id}`, default tenant gets `{user_id}`.
+pub fn tenant_scoped_key(tenant_id: &str, user_id: &str) -> String {
+    if tenant_id == DEFAULT_TENANT_ID {
+        user_id.to_string()
+    } else {
+        format!("{}:{}", tenant_id, user_id)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claims {
     /// Subject (user ID)
@@ -40,5 +50,49 @@ impl Claims {
     pub fn is_expired(&self) -> bool {
         let now = chrono::Utc::now().timestamp();
         self.exp < now
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tenant_scoped_key_default_tenant() {
+        assert_eq!(tenant_scoped_key("default", "user-123"), "user-123");
+    }
+
+    #[test]
+    fn test_tenant_scoped_key_custom_tenant() {
+        assert_eq!(
+            tenant_scoped_key("acme-corp", "user-123"),
+            "acme-corp:user-123"
+        );
+    }
+
+    #[test]
+    fn test_claims_tenant_id_default() {
+        let claims = Claims {
+            sub: "user1".to_string(),
+            exp: i64::MAX,
+            iat: 0,
+            roles: vec![],
+            tenant_id: None,
+            extra: std::collections::HashMap::new(),
+        };
+        assert_eq!(claims.tenant_id(), "default");
+    }
+
+    #[test]
+    fn test_claims_tenant_id_custom() {
+        let claims = Claims {
+            sub: "user1".to_string(),
+            exp: i64::MAX,
+            iat: 0,
+            roles: vec![],
+            tenant_id: Some("acme".to_string()),
+            extra: std::collections::HashMap::new(),
+        };
+        assert_eq!(claims.tenant_id(), "acme");
     }
 }

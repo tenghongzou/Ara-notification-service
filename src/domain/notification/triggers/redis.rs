@@ -21,6 +21,8 @@ pub struct RedisNotificationMessage {
     pub target: Option<RedisTarget>,
     /// Event data
     pub event: RedisEventData,
+    /// Optional tenant ID for multi-tenant isolation
+    pub tenant_id: Option<String>,
 }
 
 /// Target specification in Redis message
@@ -273,8 +275,8 @@ impl RedisSubscriber {
             }
         };
 
-        // Determine target first (before moving message fields)
-        let target = match self.parse_target(&message) {
+        // Determine target first (before moving message fields), with tenant channel namespacing
+        let target = match self.parse_target(&message, message.tenant_id.as_deref()) {
             Some(t) => t,
             None => {
                 tracing::warn!(
@@ -300,7 +302,10 @@ impl RedisSubscriber {
 
         let event = builder.build();
 
-        let result = self.dispatcher.dispatch(target, event).await;
+        let result = self
+            .dispatcher
+            .dispatch_for_tenant(target, event, message.tenant_id.as_deref())
+            .await;
 
         tracing::debug!(
             channel = %channel,
@@ -310,8 +315,12 @@ impl RedisSubscriber {
         );
     }
 
-    /// Parse target from Redis message
-    fn parse_target(&self, message: &RedisNotificationMessage) -> Option<NotificationTarget> {
+    /// Parse target from Redis message, applying tenant channel namespacing if provided
+    fn parse_target(
+        &self,
+        message: &RedisNotificationMessage,
+        tenant_id: Option<&str>,
+    ) -> Option<NotificationTarget> {
         match message.target_type.as_str() {
             "user" => {
                 let user_id = match &message.target {
@@ -334,6 +343,8 @@ impl RedisSubscriber {
                     Some(RedisTarget::Single(ch)) => ch.clone(),
                     _ => return None,
                 };
+                // Namespace channel for tenant isolation
+                let channel = Self::namespace_channel(channel, tenant_id);
                 Some(NotificationTarget::Channel(channel))
             }
             "channels" => {
@@ -342,9 +353,24 @@ impl RedisSubscriber {
                     Some(RedisTarget::Single(ch)) => vec![ch.clone()],
                     None => return None,
                 };
+                // Namespace channels for tenant isolation
+                let channels = channels
+                    .into_iter()
+                    .map(|ch| Self::namespace_channel(ch, tenant_id))
+                    .collect();
                 Some(NotificationTarget::Channels(channels))
             }
             _ => None,
+        }
+    }
+
+    /// Apply tenant namespace prefix to a channel name
+    fn namespace_channel(channel: String, tenant_id: Option<&str>) -> String {
+        match tenant_id {
+            Some(tid) if tid != crate::auth::DEFAULT_TENANT_ID => {
+                format!("{}:{}", tid, channel)
+            }
+            _ => channel,
         }
     }
 }

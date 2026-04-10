@@ -62,7 +62,7 @@ impl ExponentialBackoff {
         // Apply jitter only if jitter_factor > 0
         let final_delay = if self.config.jitter_factor > 0.0 {
             let jitter_range = capped_delay * self.config.jitter_factor;
-            let jitter = rand::thread_rng().gen_range(-jitter_range..jitter_range);
+            let jitter = rand::rng().random_range(-jitter_range..jitter_range);
             (capped_delay + jitter).max(1.0) as u64
         } else {
             capped_delay.max(1.0) as u64

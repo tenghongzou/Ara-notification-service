@@ -64,7 +64,7 @@ dependencies = [
  "opentelemetry-semantic-conventions",
  "opentelemetry_sdk",
  "prometheus",
- "rand 0.8.5",
+ "rand 0.9.2",
  "redis",
  "serde",
  "serde_json",

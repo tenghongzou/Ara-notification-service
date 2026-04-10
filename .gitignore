@@ -4,3 +4,8 @@ CLAUDE.md
 
 /.idea
 /target
+
+# Environment files (may contain secrets)
+.env
+.env.*
+!.env.example

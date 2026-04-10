@@ -40,10 +40,22 @@ pub struct ResolvedContent {
 }
 
 impl NotificationContent {
-    /// Resolve the content to event_type and payload
+    /// Resolve the content to event_type and payload.
+    /// When tenant_id is provided, template IDs are scoped to the tenant.
     pub fn resolve(
         self,
         template_store: &TemplateStore,
+        priority_override: Option<Priority>,
+        ttl_override: Option<u32>,
+    ) -> Result<ResolvedContent> {
+        self.resolve_for_tenant(template_store, None, priority_override, ttl_override)
+    }
+
+    /// Resolve with tenant scoping for template lookups
+    pub fn resolve_for_tenant(
+        self,
+        template_store: &TemplateStore,
+        tenant_id: Option<&str>,
         priority_override: Option<Priority>,
         ttl_override: Option<u32>,
     ) -> Result<ResolvedContent> {
@@ -52,9 +64,15 @@ impl NotificationContent {
                 template_id,
                 variables,
             } => {
+                // Scope template_id by tenant for isolation
+                let scoped_id = crate::auth::tenant_scoped_key(
+                    tenant_id.unwrap_or(crate::auth::DEFAULT_TENANT_ID),
+                    &template_id,
+                );
+
                 // Get the template
                 let template = template_store
-                    .get(&template_id)
+                    .get(&scoped_id)
                     .map_err(|e| AppError::Validation(e.to_string()))?;
 
                 // Substitute variables in the payload template

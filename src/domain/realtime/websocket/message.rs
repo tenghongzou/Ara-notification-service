@@ -34,7 +34,8 @@ impl OutboundMessage {
     }
 
     /// Convert to JSON string, either by returning the pre-serialized string
-    /// or by serializing the raw message
+    /// or by serializing the raw message.
+    /// For Serialized variant, creates a String from the Arc<str> without re-serialization.
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         match self {
             Self::Raw(msg) => serde_json::to_string(msg),

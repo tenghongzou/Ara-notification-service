@@ -61,7 +61,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 # Random (for jitter in backoff)
-rand = "0.8"
+rand = "0.9"
 
 # Prometheus metrics
 prometheus = "0.13"
