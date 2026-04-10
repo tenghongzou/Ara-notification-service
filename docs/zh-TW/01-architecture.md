@@ -168,8 +168,13 @@ src/
 │   └── *_store.rs              # Session Store 實作
 │
 ├── api/                        # REST API
-│   ├── routes.rs               # 路由定義
-│   └── handlers.rs             # 端點處理器
+│   ├── mod.rs                  # API 處理器匯出（不負責路由組裝）
+│   ├── health.rs               # 健康檢查、統計
+│   ├── connection.rs           # 頻道/訂閱查詢
+│   ├── template.rs             # 模板 CRUD
+│   ├── tenant.rs               # 租戶查詢
+│   ├── cluster.rs              # 叢集狀態查詢
+│   └── metrics.rs              # Prometheus 指標端點
 │
 ├── metrics/                    # Prometheus 指標
 │   └── helpers.rs              # 指標定義
@@ -186,6 +191,8 @@ src/
 └── error/                      # 錯誤處理
     └── mod.rs                  # AppError 定義
 ```
+
+> 路由唯一入口檔：`src/server/app.rs::create_app()`（統一組裝 `/health`、`/metrics` 與 `/api/v1/*` 路由）。
 
 ---
 
@@ -420,4 +427,3 @@ pub struct ConnectionLimits {
 - [API 參考](./03-api-reference.md)
 - [開發指南](./04-development-guide.md)
 - [進階功能](./05-advanced-features.md)
-
