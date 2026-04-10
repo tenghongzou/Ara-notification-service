@@ -216,10 +216,13 @@ notification:channel:{name}     # 頻道
 | `JWT_ISSUER` | JWT 簽發者驗證 | (選填) |
 | `JWT_AUDIENCE` | JWT 受眾驗證 | (選填) |
 | `REDIS_URL` | Redis 連線 URL | `redis://localhost:6379` |
-| `API_KEY` | HTTP API 認證金鑰 | (選填) |
+| `API_KEY` | HTTP API 認證金鑰 | `RUN_MODE=production` 時必填（至少 16 字元） |
 | `CORS_ORIGINS` | 允許的來源 (逗號分隔) | (空=允許全部) |
 | `RUN_MODE` | 執行模式 | `development` |
 | `RUST_LOG` | 日誌等級 | `info` |
+
+> ⚠️ **Production 必填警示：`RUN_MODE=production` 時必須設定 `API_KEY`，且長度至少 16 字元。**
+> 若缺失或過短，服務啟動時設定驗證會失敗，且 API middleware 會拒絕請求以避免未授權存取。
 
 ### WebSocket 配置
 

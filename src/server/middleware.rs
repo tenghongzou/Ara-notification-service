@@ -9,6 +9,7 @@ use axum::{
     Json,
 };
 use serde_json::json;
+use std::env;
 
 use super::AppState;
 use crate::metrics::RateLimitMetrics;
@@ -21,16 +22,24 @@ pub async fn api_key_auth(
     req: Request<Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    // If no API key is configured, allow all requests (development mode)
+    let run_mode = env::var("RUN_MODE").unwrap_or_else(|_| "development".into());
+    let is_production =
+        run_mode.eq_ignore_ascii_case("production") || run_mode.eq_ignore_ascii_case("prod");
+
+    // If no API key is configured, only allow in non-production mode.
     let Some(expected_key) = &state.settings.api.key else {
+        if is_production {
+            tracing::error!(
+                run_mode = %run_mode,
+                "🚨 [P0] Production API key misconfiguration: API_KEY is missing, rejecting request"
+            );
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
         return Ok(next.run(req).await);
     };
 
     // Check X-API-Key header
-    let api_key = req
-        .headers()
-        .get("X-API-Key")
-        .and_then(|v| v.to_str().ok());
+    let api_key = req.headers().get("X-API-Key").and_then(|v| v.to_str().ok());
 
     match api_key {
         Some(key) if key == expected_key => Ok(next.run(req).await),
@@ -69,10 +78,7 @@ pub async fn rate_limit_middleware(
     }
 
     // Get API key from header or use IP address
-    let api_key = req
-        .headers()
-        .get("X-API-Key")
-        .and_then(|v| v.to_str().ok());
+    let api_key = req.headers().get("X-API-Key").and_then(|v| v.to_str().ok());
 
     let result = state.rate_limiter.check_http(api_key, addr.ip());
 

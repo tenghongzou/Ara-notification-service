@@ -408,6 +408,7 @@ const VALID_BACKENDS: &[&str] = &["memory", "redis", "postgres"];
 
 /// Valid backend types for rate limiting
 const VALID_RATELIMIT_BACKENDS: &[&str] = &["local", "redis"];
+const MIN_API_KEY_LENGTH: usize = 16;
 
 impl Settings {
     pub fn new() -> Result<Self, ConfigError> {
@@ -471,11 +472,7 @@ impl Settings {
             .add_source(File::with_name(&format!("config/{}", run_mode)).required(false))
             // Load from environment variables
             // SERVER_HOST, SERVER_PORT, JWT_SECRET, REDIS_URL, etc.
-            .add_source(
-                Environment::default()
-                    .separator("_")
-                    .try_parsing(true),
-            );
+            .add_source(Environment::default().separator("_").try_parsing(true));
 
         let settings: Self = builder.build()?.try_deserialize()?;
         settings.validate()?;
@@ -484,7 +481,14 @@ impl Settings {
 
     /// Validate configuration values
     fn validate(&self) -> Result<(), ConfigError> {
+        let run_mode = env::var("RUN_MODE").unwrap_or_else(|_| "development".into());
+        self.validate_with_run_mode(&run_mode)
+    }
+
+    fn validate_with_run_mode(&self, run_mode: &str) -> Result<(), ConfigError> {
         let mut errors: Vec<String> = Vec::new();
+        let is_production =
+            run_mode.eq_ignore_ascii_case("production") || run_mode.eq_ignore_ascii_case("prod");
 
         // Validate JWT_SECRET length (minimum 32 characters for security)
         if self.jwt.secret.len() < 32 {
@@ -492,6 +496,22 @@ impl Settings {
                 "JWT_SECRET must be at least 32 characters (current: {} characters)",
                 self.jwt.secret.len()
             ));
+        }
+
+        // Validate API_KEY in production
+        if is_production {
+            match self.api.key.as_deref() {
+                Some(key) if key.trim().len() >= MIN_API_KEY_LENGTH => {}
+                Some(key) => errors.push(format!(
+                    "API_KEY must be at least {} characters in production mode (current: {} characters)",
+                    MIN_API_KEY_LENGTH,
+                    key.trim().len()
+                )),
+                None => errors.push(format!(
+                    "API_KEY is required when RUN_MODE={} and must be at least {} characters",
+                    run_mode, MIN_API_KEY_LENGTH
+                )),
+            }
         }
 
         // Validate Redis URL format
@@ -515,10 +535,14 @@ impl Settings {
             errors.push("websocket.connection_timeout must be greater than 0".to_string());
         }
         if self.ack.enabled && self.ack.timeout_seconds == 0 {
-            errors.push("ack.timeout_seconds must be greater than 0 when ACK is enabled".to_string());
+            errors
+                .push("ack.timeout_seconds must be greater than 0 when ACK is enabled".to_string());
         }
         if self.queue.enabled && self.queue.message_ttl_seconds == 0 {
-            errors.push("queue.message_ttl_seconds must be greater than 0 when queue is enabled".to_string());
+            errors.push(
+                "queue.message_ttl_seconds must be greater than 0 when queue is enabled"
+                    .to_string(),
+            );
         }
 
         // Validate backend values
@@ -779,5 +803,36 @@ mod tests {
         assert!(err.contains("JWT_SECRET"));
         assert!(err.contains("Server port"));
         assert!(err.contains("queue.backend"));
+    }
+
+    #[test]
+    fn test_validate_production_requires_api_key() {
+        let mut settings = create_test_settings();
+        settings.api.key = None;
+
+        let result = settings.validate_with_run_mode("production");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("API_KEY is required"));
+    }
+
+    #[test]
+    fn test_validate_production_accepts_valid_api_key() {
+        let mut settings = create_test_settings();
+        settings.api.key = Some("prod-api-key-1234567890".to_string());
+
+        let result = settings.validate_with_run_mode("production");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_production_rejects_short_api_key() {
+        let mut settings = create_test_settings();
+        settings.api.key = Some("short-key".to_string());
+
+        let result = settings.validate_with_run_mode("production");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("API_KEY must be at least"));
     }
 }

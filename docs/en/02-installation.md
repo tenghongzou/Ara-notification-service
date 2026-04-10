@@ -166,7 +166,7 @@ CMD ["ara-notification-service"]
 | `JWT_ISSUER` | JWT issuer validation | - | No |
 | `JWT_AUDIENCE` | JWT audience validation | - | No |
 | `REDIS_URL` | Redis connection URL | `redis://localhost:6379` | No |
-| `API_KEY` | HTTP API authentication key | - | Recommended for production |
+| `API_KEY` | HTTP API authentication key | - | **Required in production (min 16 chars)** |
 | `CORS_ORIGINS` | Allowed origins | - (allow all) | Recommended for production |
 | `RUST_LOG` | Log level | `info` | No |
 
@@ -205,6 +205,9 @@ CMD ["ara-notification-service"]
 ---
 
 ## Production Configuration
+
+> ⚠️ **Production requirement:** when `RUN_MODE=production`, `API_KEY` is mandatory and must be at least 16 characters.
+> Missing/short keys will fail configuration validation and protected API requests will be rejected.
 
 ### Recommended Configuration Example
 
@@ -387,4 +390,3 @@ Error: Connection limit exceeded
 - [API Reference](./03-api-reference.md)
 - [Advanced Features](./05-advanced-features.md)
 - [Observability](./06-observability.md)
-
