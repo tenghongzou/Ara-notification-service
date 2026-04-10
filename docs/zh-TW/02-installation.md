@@ -166,7 +166,7 @@ CMD ["ara-notification-service"]
 | `JWT_ISSUER` | JWT 簽發者驗證 | - | 否 |
 | `JWT_AUDIENCE` | JWT 受眾驗證 | - | 否 |
 | `REDIS_URL` | Redis 連線 URL | `redis://localhost:6379` | 否 |
-| `API_KEY` | HTTP API 認證金鑰 | - | 生產環境建議 |
+| `API_KEY` | HTTP API 認證金鑰 | - | **生產環境必填（至少 16 字元）** |
 | `CORS_ORIGINS` | 允許的來源 | - (允許全部) | 生產環境建議 |
 | `RUST_LOG` | 日誌等級 | `info` | 否 |
 
@@ -205,6 +205,9 @@ CMD ["ara-notification-service"]
 ---
 
 ## 生產環境配置
+
+> ⚠️ **生產環境必填：** 當 `RUN_MODE=production` 時，`API_KEY` 必須設定且長度至少 16 字元。  
+> 若缺失或過短，設定驗證會失敗，且受保護 API 請求會被拒絕。
 
 ### 建議配置範例
 
@@ -387,4 +390,3 @@ Error: Connection limit exceeded
 - [API 參考](./03-api-reference.md)
 - [進階功能](./05-advanced-features.md)
 - [可觀測性](./06-observability.md)
-
