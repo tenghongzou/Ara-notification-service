@@ -99,7 +99,7 @@
 - [x] `src/main.rs` - 更新 `GracefulShutdown` 初始化
 - [x] `src/api/handlers.rs` - 更新 metrics 收集使用 backend traits
 - [x] `tests/components_integration.rs` - 更新測試使用 `create_queue_backend()` 和 `create_ack_backend()` factory 函數
-- [x] 編譯驗證通過 (184 tests passed)
+- [x] 編譯驗證通過（測試數量請以 `cargo test` 最新輸出為準）
 
 ---
 
