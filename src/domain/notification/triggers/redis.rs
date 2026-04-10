@@ -364,7 +364,8 @@ impl RedisSubscriber {
         }
     }
 
-    /// Apply tenant namespace prefix to a channel name
+    /// Apply tenant namespace prefix to a channel name.
+    /// Default tenant channels are returned unchanged (no prefix).
     fn namespace_channel(channel: String, tenant_id: Option<&str>) -> String {
         match tenant_id {
             Some(tid) if tid != crate::auth::DEFAULT_TENANT_ID => {

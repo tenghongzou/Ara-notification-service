@@ -82,7 +82,7 @@ impl Template {
             .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == ':')
         {
             return Err(TemplateError::InvalidId(
-                "ID must contain only alphanumeric, dash, or underscore".to_string(),
+                "ID must contain only alphanumeric, dash, underscore, or colon".to_string(),
             ));
         }
 

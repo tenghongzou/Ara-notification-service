@@ -290,16 +290,16 @@ TENANT_ACME_CORP_MAX_CONNECTIONS_PER_USER=10
 
 ```bash
 CLUSTER_ENABLED=true
-CLUSTER_NODE_ID=node-1              # 唯一節點識別
-CLUSTER_SESSION_STORE=redis         # 會話儲存後端
+CLUSTER_SERVER_ID=node-1            # 唯一伺服器識別（省略則自動產生）
+# 叢集模式在 CLUSTER_ENABLED=true 且 Redis 可用時自動使用 Redis
 ```
 
 ### 會話儲存後端
 
 | 後端 | 配置 | 特性 |
 |------|------|------|
-| Local | `CLUSTER_SESSION_STORE=local` | 單節點，無叢集 |
-| Redis | `CLUSTER_SESSION_STORE=redis` | 分散式會話 |
+| Local | `CLUSTER_ENABLED=false` | 單節點，無叢集 |
+| Redis | `CLUSTER_ENABLED=true` + Redis 已配置 | 透過 Redis 分散式會話 |
 
 ### 運作原理
 
@@ -357,17 +357,17 @@ POST /api/v1/notifications/batch
 {
   "notifications": [
     {
-      "target": { "type": "user", "id": "user-1" },
+      "target": { "type": "user", "value": "user-1" },
       "event_type": "message.new",
       "payload": { "text": "Hello" }
     },
     {
-      "target": { "type": "channel", "name": "orders" },
+      "target": { "type": "channel", "value": "orders" },
       "event_type": "order.created",
       "payload": { "order_id": "123" }
     }
   ],
-  "atomic": false
+  "options": { "stop_on_error": false, "deduplicate": false }
 }
 ```
 
@@ -433,7 +433,7 @@ TENANT_DEFAULT_MAX_CONNECTIONS=5000
 
 # 叢集
 CLUSTER_ENABLED=true
-CLUSTER_SESSION_STORE=redis
+CLUSTER_ENABLED=true
 
 # 持久化
 QUEUE_ENABLED=true

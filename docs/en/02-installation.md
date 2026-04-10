@@ -11,7 +11,7 @@ This document describes how to install, configure, and deploy Ara Notification S
 | Software | Minimum Version | Recommended | Description |
 |----------|----------------|-------------|-------------|
 | **Rust** | 1.75 | Latest stable | Compilation and execution |
-| **Redis** | 6.0 | 7.0+ | Pub/Sub, distributed state |
+| **Redis** | 7.0 | 7.0+ | Pub/Sub, distributed state |
 
 ### Optional Software
 
@@ -29,7 +29,7 @@ This document describes how to install, configure, and deploy Ara Notification S
 
 ```bash
 # Enter service directory
-cd /srv/Ara-infra/services/notification
+cd /srv/Ara-notification-service
 ```
 
 ### 2. Environment Configuration
@@ -114,7 +114,7 @@ Service is integrated into Ara-infra main project's `docker-compose.yml`:
 
 ```bash
 # From Ara-infra root
-cd /srv/Ara-infra
+cd /srv/Ara-notification-service
 
 # Start notification service
 docker-compose up -d notification

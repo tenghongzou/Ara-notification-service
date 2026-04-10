@@ -290,16 +290,16 @@ Multi-node deployment with cross-node user routing support.
 
 ```bash
 CLUSTER_ENABLED=true
-CLUSTER_NODE_ID=node-1              # Unique node identifier
-CLUSTER_SESSION_STORE=redis         # Session storage backend
+CLUSTER_SERVER_ID=node-1            # Unique server identifier (auto-generated if omitted)
+# Cluster uses Redis automatically when CLUSTER_ENABLED=true and Redis is available
 ```
 
 ### Session Storage Backend
 
 | Backend | Configuration | Characteristics |
 |---------|--------------|-----------------|
-| Local | `CLUSTER_SESSION_STORE=local` | Single node, no cluster |
-| Redis | `CLUSTER_SESSION_STORE=redis` | Distributed sessions |
+| Local | `CLUSTER_ENABLED=false` | Single node, no cluster |
+| Redis | `CLUSTER_ENABLED=true` + Redis configured | Distributed sessions via Redis |
 
 ### How It Works
 
@@ -357,17 +357,17 @@ POST /api/v1/notifications/batch
 {
   "notifications": [
     {
-      "target": { "type": "user", "id": "user-1" },
+      "target": { "type": "user", "value": "user-1" },
       "event_type": "message.new",
       "payload": { "text": "Hello" }
     },
     {
-      "target": { "type": "channel", "name": "orders" },
+      "target": { "type": "channel", "value": "orders" },
       "event_type": "order.created",
       "payload": { "order_id": "123" }
     }
   ],
-  "atomic": false
+  "options": { "stop_on_error": false, "deduplicate": false }
 }
 ```
 
@@ -433,7 +433,7 @@ TENANT_DEFAULT_MAX_CONNECTIONS=5000
 
 # Cluster
 CLUSTER_ENABLED=true
-CLUSTER_SESSION_STORE=redis
+CLUSTER_ENABLED=true
 
 # Persistence
 QUEUE_ENABLED=true

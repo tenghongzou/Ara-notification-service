@@ -251,17 +251,20 @@ POST /api/v1/notifications/batch
 {
   "notifications": [
     {
-      "target": { "type": "user", "id": "user-1" },
+      "target": { "type": "user", "value": "user-1" },
       "event_type": "message.new",
       "payload": { "text": "Hello" }
     },
     {
-      "target": { "type": "channel", "name": "orders" },
+      "target": { "type": "channel", "value": "orders" },
       "event_type": "order.created",
       "payload": { "order_id": "123" }
     }
   ],
-  "atomic": false
+  "options": {
+    "stop_on_error": false,
+    "deduplicate": false
+  }
 }
 ```
 

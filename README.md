@@ -443,8 +443,8 @@ src/
 
 - [API Reference (EN)](docs/en/03-api-reference.md) - 完整 API 文件（英文）
 - [API 參考（繁中）](docs/zh-TW/03-api-reference.md) - 完整 API 文件（繁體中文）
-- [系統架構](docs/ARCHITECTURE.md) - 詳細架構說明
-- [開發路線圖](docs/ROADMAP.md) - 進階功能開發計畫
+- [Architecture (EN)](docs/en/01-architecture.md) - 詳細架構說明（英文）
+- [架構說明（繁中）](docs/zh-TW/01-architecture.md) - 詳細架構說明（繁體中文）
 - [變更記錄](CHANGELOG.md) - 版本變更歷史
 - [貢獻指南](CONTRIBUTING.md) - 貢獻程式碼指引
 

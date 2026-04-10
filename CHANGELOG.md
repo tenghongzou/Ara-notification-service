@@ -128,7 +128,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Planned
 
-See [ROADMAP.md](docs/ROADMAP.md) for Phase 4 advanced features (templates, multi-tenancy, SSE).
+See [Advanced Features](docs/en/05-advanced-features.md) for templates, multi-tenancy, and SSE documentation.
 
 ---
 
@@ -179,9 +179,9 @@ See [ROADMAP.md](docs/ROADMAP.md) for Phase 4 advanced features (templates, mult
 ### Documentation
 - **README.md** - Project overview with quick start guide
 - **CLAUDE.md** - Development guidelines for Claude Code
-- **docs/API.md** - Complete API specification
-- **docs/ARCHITECTURE.md** - System architecture documentation
-- **docs/ROADMAP.md** - Development roadmap with phase planning
+- **docs/en/03-api-reference.md** - Complete API specification
+- **docs/en/01-architecture.md** - System architecture documentation
+- **docs/en/05-advanced-features.md** - Advanced features documentation
 - **CONTRIBUTING.md** - Contribution guidelines
 
 ### Testing
@@ -223,7 +223,6 @@ This is the first stable release. No migration required.
 
 ## Links
 
-- [GitHub Repository](https://github.com/your-org/ara-infra)
-- [API Documentation](docs/API.md)
-- [Architecture Documentation](docs/ARCHITECTURE.md)
-- [Development Roadmap](docs/ROADMAP.md)
+- [API Documentation](docs/en/03-api-reference.md)
+- [Architecture Documentation](docs/en/01-architecture.md)
+- [Advanced Features](docs/en/05-advanced-features.md)

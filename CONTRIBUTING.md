@@ -29,8 +29,8 @@
 
 ```bash
 # 1. Clone 專案
-git clone https://github.com/your-org/ara-infra.git
-cd ara-infra/services/notification
+git clone https://github.com/your-org/Ara-notification-service.git
+cd Ara-notification-service
 
 # 2. 安裝 Rust 工具鏈
 rustup update stable
@@ -467,8 +467,8 @@ async fn test_with_mock_store() {
 | CHANGELOG.md | 根目錄 | 版本變更記錄 |
 | docs/en/03-api-reference.md | docs/en/ | API 規格文檔（英文） |
 | docs/zh-TW/03-api-reference.md | docs/zh-TW/ | API 規格文檔（繁中） |
-| docs/ARCHITECTURE.md | docs/ | 系統架構設計 |
-| docs/ROADMAP.md | docs/ | 開發路線圖 |
+| docs/en/01-architecture.md | docs/en/ | 系統架構設計（英文） |
+| docs/zh-TW/01-architecture.md | docs/zh-TW/ | 系統架構設計（繁中） |
 
 ### 文件版本同步規則
 
