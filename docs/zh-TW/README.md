@@ -83,6 +83,8 @@
 
 - [English Documentation](../en/README.md)
 - [專案 README](../../README.md)
-- [API 規格 (原始)](../API.md)
-- [架構文件 (原始)](../ARCHITECTURE.md)
+- [API 參考（英文）](../en/03-api-reference.md)
+- [API 參考（繁中）](./03-api-reference.md)
+- [系統架構（英文）](../en/01-architecture.md)
+- [系統架構（繁中）](./01-architecture.md)
 - [變更記錄](../../CHANGELOG.md)

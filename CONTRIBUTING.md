@@ -284,7 +284,7 @@ Fixes #38
 - [ ] 新功能有對應的單元測試
 - [ ] 公開 API 有文檔註解
 - [ ] CHANGELOG.md 已更新（如適用）
-- [ ] 相關文檔已更新（README, API.md 等）
+- [ ] 相關文檔已更新（README、docs/en/03-api-reference.md、docs/zh-TW/03-api-reference.md 等）
 
 ### PR 標題格式
 
@@ -465,9 +465,25 @@ async fn test_with_mock_store() {
 | CLAUDE.md | 根目錄 | Claude Code 開發指引 |
 | CONTRIBUTING.md | 根目錄 | 貢獻指南 |
 | CHANGELOG.md | 根目錄 | 版本變更記錄 |
-| docs/API.md | docs/ | API 規格文檔 |
+| docs/en/03-api-reference.md | docs/en/ | API 規格文檔（英文） |
+| docs/zh-TW/03-api-reference.md | docs/zh-TW/ | API 規格文檔（繁中） |
 | docs/ARCHITECTURE.md | docs/ | 系統架構設計 |
 | docs/ROADMAP.md | docs/ | 開發路線圖 |
+
+### 文件版本同步規則
+
+為避免文件內容與實作脫節，以下情境必須在同一個 PR 內同步更新對應文件：
+
+1. **API 行為或介面異動**（新增/刪除/修改 endpoint、request/response schema、認證規則）
+   - 必須同步更新：`README.md`、`docs/en/03-api-reference.md`、`docs/zh-TW/03-api-reference.md`。
+2. **測試架構異動**（測試分類、測試流程、CI 測試步驟）
+   - 必須同步更新：`README.md`、`CONTRIBUTING.md`、`TODO.md`（如有里程碑描述）、相關語系文件。
+3. **測試數據呈現規則**
+   - 文件中避免硬編碼測試總數（例如 `121`、`184`）。
+   - 請改以「執行 `cargo test` 取得最新數量」或提供 CI badge/報表連結。
+4. **多語系一致性**
+   - 若更新 `docs/en/*` 或 `docs/zh-TW/*` 任一語系內容，需在 PR 中註明另一語系是否同步更新，或列出待補翻譯項目。
+
 
 ### Markdown 格式規範
 
