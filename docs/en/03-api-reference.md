@@ -40,11 +40,19 @@ GET /health
 {
   "status": "healthy",
   "version": "1.0.0",
-  "components": {
-    "redis": "connected"
+  "uptime_seconds": 12345,
+  "redis": {
+    "status": "disabled",
+    "connected": false
   }
 }
 ```
+
+**`status` semantics:**
+
+- `healthy`: all enabled and required dependencies are healthy; if Redis is not enabled (for example, queue/ack are not using redis and cluster is off), overall status remains `healthy`.
+- `degraded`: at least one required dependency is unhealthy (for example, Redis backend is enabled but Redis is not currently `healthy`).
+- `disabled` (component-level, such as `redis.status`): component is not required/not configured in the current runtime setup and does not degrade overall health.
 
 ### Prometheus Metrics
 
@@ -748,4 +756,3 @@ $redis->publish('notification:channel:orders', json_encode([
 - [Installation & Deployment](./02-installation.md)
 - [Development Guide](./04-development-guide.md)
 - [Advanced Features](./05-advanced-features.md)
-

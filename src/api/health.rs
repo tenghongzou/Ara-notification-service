@@ -1,9 +1,6 @@
 //! Health check and statistics endpoints.
 
-use axum::{
-    extract::State,
-    Json,
-};
+use axum::{extract::State, Json};
 use serde::Serialize;
 
 use crate::server::AppState;
@@ -105,8 +102,17 @@ pub struct AckStats {
 }
 
 pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
+    let redis_required = (state.settings.queue.enabled && state.settings.queue.backend == "redis")
+        || (state.settings.ack.enabled && state.settings.ack.backend == "redis")
+        || state.settings.cluster.enabled;
+
     let redis_health = state.redis_health.stats();
-    let is_redis_healthy = redis_health.status == crate::redis::RedisHealthStatus::Healthy;
+    let redis_status = if redis_required {
+        redis_health.status
+    } else {
+        crate::redis::RedisHealthStatus::Disabled
+    };
+    let is_redis_healthy = redis_status == crate::redis::RedisHealthStatus::Healthy;
 
     let uptime_seconds = state.start_time.elapsed().as_secs();
     let conn_stats = state.connection_manager.stats();
@@ -133,14 +139,18 @@ pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         None
     };
 
-    let status = if is_redis_healthy { "healthy" } else { "degraded" };
+    let status = if !redis_required || is_redis_healthy {
+        "healthy"
+    } else {
+        "degraded"
+    };
 
     Json(HealthResponse {
         status: status.to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         uptime_seconds,
         redis: RedisHealthResponse {
-            status: redis_health.status.as_str().to_string(),
+            status: redis_status.as_str().to_string(),
             connected: is_redis_healthy,
         },
         postgres,
