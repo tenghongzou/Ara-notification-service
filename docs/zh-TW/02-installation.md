@@ -85,7 +85,7 @@ cargo run --release
 curl http://localhost:8081/health
 
 # 預期回應
-{"status":"healthy","components":{"redis":"connected"}}
+{"status":"healthy","version":"1.0.0","uptime_seconds":12,"redis":{"status":"disabled","connected":false},"connections":{"total":0,"unique_users":0,"channels_count":0},"queue":{"enabled":false,"backend":"memory","total_messages":0,"users_with_queue":0}}
 ```
 
 ---
@@ -263,11 +263,8 @@ RUST_LOG=warn,ara_notification_service=info
 ### 端點
 
 ```bash
-# 基本健康檢查
+# 健康檢查（單一端點，無 query 參數）
 GET /health
-
-# 詳細健康資訊
-GET /health?detailed=true
 ```
 
 ### 回應格式
@@ -277,19 +274,36 @@ GET /health?detailed=true
   "status": "healthy",
   "version": "1.0.0",
   "uptime_seconds": 3600,
-  "components": {
-    "redis": "connected",
-    "websocket": "ready",
-    "queue": "enabled",
-    "rate_limiter": "enabled"
+  "redis": {
+    "status": "connected",
+    "connected": true
   },
-  "stats": {
-    "connections": 1234,
-    "users_connected": 567,
-    "channels_active": 89
+  "postgres": {
+    "status": "connected",
+    "connected": true,
+    "pool_size": 10,
+    "idle_connections": 8
+  },
+  "connections": {
+    "total": 1234,
+    "unique_users": 567,
+    "channels_count": 89
+  },
+  "queue": {
+    "enabled": true,
+    "backend": "redis",
+    "total_messages": 0,
+    "users_with_queue": 0
+  },
+  "cluster": {
+    "enabled": false,
+    "server_id": "ara-..."
   }
 }
 ```
+
+`postgres` 和 `cluster` 欄位僅在對應功能啟用時出現。
+`status` 可能為 `healthy` 或 `degraded`（當 Redis 為必要但無法連線時）。
 
 ### Kubernetes 探針
 

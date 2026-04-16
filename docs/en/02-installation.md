@@ -85,7 +85,7 @@ cargo run --release
 curl http://localhost:8081/health
 
 # Expected response
-{"status":"healthy","components":{"redis":"connected"}}
+{"status":"healthy","version":"1.0.0","uptime_seconds":12,"redis":{"status":"disabled","connected":false},"connections":{"total":0,"unique_users":0,"channels_count":0},"queue":{"enabled":false,"backend":"memory","total_messages":0,"users_with_queue":0}}
 ```
 
 ---
@@ -263,11 +263,8 @@ RUST_LOG=warn,ara_notification_service=info
 ### Endpoints
 
 ```bash
-# Basic health check
+# Health check (single endpoint, no query parameters)
 GET /health
-
-# Detailed health info
-GET /health?detailed=true
 ```
 
 ### Response Format
@@ -277,19 +274,36 @@ GET /health?detailed=true
   "status": "healthy",
   "version": "1.0.0",
   "uptime_seconds": 3600,
-  "components": {
-    "redis": "connected",
-    "websocket": "ready",
-    "queue": "enabled",
-    "rate_limiter": "enabled"
+  "redis": {
+    "status": "connected",
+    "connected": true
   },
-  "stats": {
-    "connections": 1234,
-    "users_connected": 567,
-    "channels_active": 89
+  "postgres": {
+    "status": "connected",
+    "connected": true,
+    "pool_size": 10,
+    "idle_connections": 8
+  },
+  "connections": {
+    "total": 1234,
+    "unique_users": 567,
+    "channels_count": 89
+  },
+  "queue": {
+    "enabled": true,
+    "backend": "redis",
+    "total_messages": 0,
+    "users_with_queue": 0
+  },
+  "cluster": {
+    "enabled": false,
+    "server_id": "ara-..."
   }
 }
 ```
+
+`postgres` and `cluster` fields are only present when those features are enabled.
+`status` may be `healthy` or `degraded` (if Redis is required but unavailable).
 
 ### Kubernetes Probes
 

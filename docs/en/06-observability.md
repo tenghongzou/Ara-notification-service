@@ -318,60 +318,51 @@ scrape_configs:
 
 ```http
 GET /health
-GET /health?detailed=true
 ```
 
 ### Response Format
-
-**Simple Response:**
-
-```json
-{
-  "status": "healthy"
-}
-```
-
-**Detailed Response:**
 
 ```json
 {
   "status": "healthy",
   "version": "1.0.0",
   "uptime_seconds": 86400,
-  "components": {
-    "redis": {
-      "status": "connected",
-      "latency_ms": 1
-    },
-    "websocket": {
-      "status": "ready",
-      "connections": 1234
-    },
-    "queue": {
-      "status": "enabled",
-      "pending_messages": 456
-    },
-    "rate_limiter": {
-      "status": "enabled",
-      "rejected_last_minute": 12
-    }
+  "redis": {
+    "status": "connected",
+    "connected": true
   },
-  "stats": {
-    "connections_total": 1234,
-    "users_connected": 567,
-    "channels_active": 89,
-    "messages_sent_today": 12345
+  "postgres": {
+    "status": "connected",
+    "connected": true,
+    "pool_size": 10,
+    "idle_connections": 8
+  },
+  "connections": {
+    "total": 1234,
+    "unique_users": 567,
+    "channels_count": 89
+  },
+  "queue": {
+    "enabled": true,
+    "backend": "redis",
+    "total_messages": 456,
+    "users_with_queue": 23
+  },
+  "cluster": {
+    "enabled": false,
+    "server_id": "ara-..."
   }
 }
 ```
+
+`postgres` and `cluster` fields are only present when those features are enabled.
 
 ### Health Status
 
 | Status | HTTP Code | Description |
 |--------|-----------|-------------|
-| `healthy` | 200 | All components normal |
-| `degraded` | 200 | Some components abnormal, service available |
-| `unhealthy` | 503 | Critical components abnormal, service unavailable |
+| `healthy` | 200 | Redis (when required) is connected |
+| `degraded` | 200 | Redis required but not currently healthy |
 
 ---
 

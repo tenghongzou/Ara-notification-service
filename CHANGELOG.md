@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+- **Multi-tenant isolation across all dispatch paths**: HTTP handlers (5 endpoints), batch endpoint, Redis Pub/Sub subscriber, and cluster router all now apply tenant scoping via `dispatch_for_tenant()`.
+- **Channel namespace isolation**: WebSocket subscribe/unsubscribe and HTTP channel/multi-channel handlers automatically prefix channels with tenant ID. Channel name validation excludes colon to prevent namespace spoofing.
+- **API key constant-time comparison** in `src/server/middleware.rs` to prevent timing attacks. `is_production` flag cached in `Settings` (no per-request env var read).
+- **X-Tenant-ID header validation**: alphanumeric/dash/underscore/dot only, no colon, max 64 chars, trimmed.
+- **Template store tenant isolation**: All CRUD operations and `resolve_for_tenant()` apply tenant prefix. Default tenant cannot enumerate other tenants' templates.
+- **API endpoints tenant-filtered**: `/api/v1/channels`, `/api/v1/tenants`, `/api/v1/cluster/users/*`, `/api/v1/templates/*`. `/stats` and `/metrics` no longer expose per-channel cross-tenant data.
+- **Queue keys tenant-scoped** via shared `tenant_scoped_key()` function used by enqueue (dispatcher) and drain (WS/SSE handlers).
+- **Cluster ACL fixes**: SREM for user-server mapping uses precise `(connection_id, user_id)` tracking via `DashMap<Uuid, String>`. `all_users_key` now has TTL to prevent unbounded growth.
+- **JwtConfig Debug trait redacts the secret field** to prevent accidental log leakage.
+- **SSE handler now registers/unregisters cluster sessions** matching WebSocket behavior.
+- **Production mode hardening**: Backend pool creation failures now `bail!` instead of silently degrading to memory backend.
+
+### Fixed
+- Redis `KEYS` replaced with `SCAN` cursor iteration in `src/domain/cluster/redis_store.rs` to prevent blocking the Redis instance.
+- mpsc `send`/`send_preserialized` wrapped with 5s timeout to prevent stalled consumers from blocking dispatch.
+- WebSocket max message size limited to 64 KB.
+- Array size validation: `target_user_ids` capped at 10,000; `channels` capped at 100.
+- Config cross-validation: `connection_timeout > heartbeat_interval`, `cluster.session_ttl > heartbeat_interval`, CORS required in production.
+- Backend `disabled` behavior unified: all read operations return `Ok(default)`, write operations return `Err(Disabled)`.
+- Postgres queue backend `drain`/`peek`/`queue_size`/`clear_user_queue` return `Ok(default)` when disabled (consistency with memory backend).
+- Template ID validation now allows colon for internal tenant prefixing; validation runs before prefix in API layer.
+- Heartbeat removed redundant outer `timeout` (inner `send_preserialized` already has 5s timeout).
+- `Settings::is_production` computed once at startup instead of re-reading env var in `validate()`.
+
+### Performance
+- Redis `XLEN` replaces `XRANGE` for O(1) queue size counting.
+- Redis `ZCARD` replaces `ZRANGEBYSCORE` for O(1) pending ACK counting.
+- Heartbeat pre-serialization: serialize `{"type":"heartbeat"}` once and share via `Arc<str>` across all connections.
+
+### Dependencies
+- `rand` upgraded from 0.8 to 0.9 (`thread_rng()` → `rng()`, `gen_range` → `random_range`).
+
 ## [1.0.0] - 2025-12-27
 
 ### Added
@@ -198,6 +233,8 @@ See [Advanced Features](docs/en/05-advanced-features.md) for templates, multi-te
 
 | Version | Date | Highlights |
 |---------|------|------------|
+| Unreleased | — | Multi-tenant isolation hardening, security audit fixes, performance optimizations |
+| 1.0.0 | 2025-12-27 | SSE, multi-tenancy, templates, offline queue, rate limiting, ACK tracking |
 | 0.1.0 | 2025-12-27 | Initial release with core features |
 
 ---

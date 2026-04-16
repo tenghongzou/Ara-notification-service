@@ -388,55 +388,55 @@ eventSource.onerror = (e) => {
 
 ## 專案結構
 
+採用分層（洋蔥）架構：Infrastructure → Domain → API → Server。
+
 ```
 src/
-├── main.rs                     # 進入點、服務啟動
-├── lib.rs                      # 模組匯出
-├── config/                     # 配置模組
-│   └── settings.rs             # Settings 結構與載入
-├── server/                     # 伺服器建構
-│   ├── app.rs                  # Axum 路由與中介層
-│   ├── middleware.rs           # API Key 認證、限流中介層
-│   └── state.rs                # AppState 共享狀態
-├── auth/                       # JWT 認證
-│   ├── jwt.rs                  # JwtValidator
-│   └── claims.rs               # Claims 結構 (含 tenant_id)
-├── websocket/                  # WebSocket 處理
-│   ├── handler.rs              # 連線處理、訊息路由
-│   └── message.rs              # ClientMessage, ServerMessage
-├── sse/                        # SSE 處理
-│   ├── mod.rs                  # 模組匯出
-│   └── handler.rs              # SSE 連線處理
-├── notification/               # 通知核心邏輯
-│   ├── types.rs                # NotificationEvent, Priority, Audience
-│   ├── dispatcher.rs           # NotificationDispatcher
-│   └── ack.rs                  # AckTracker 確認追蹤
-├── connection_manager/         # 連線管理
-│   └── registry.rs             # ConnectionManager 三索引設計
-├── template/                   # 通知模板
-│   └── mod.rs                  # TemplateStore, 變數替換
-├── tenant/                     # 多租戶支援
-│   └── mod.rs                  # TenantManager, TenantContext
-├── queue/                      # 離線訊息佇列
-│   └── mod.rs                  # UserMessageQueue
-├── ratelimit/                  # 請求限流
-│   └── mod.rs                  # RateLimiter (Token Bucket)
-├── redis/                      # Redis 高可用
-│   └── mod.rs                  # CircuitBreaker, RedisHealth
-├── triggers/                   # 觸發器
-│   ├── http.rs                 # HTTP REST API handlers
-│   └── redis.rs                # RedisSubscriber
-├── tasks/                      # 背景任務
-│   └── heartbeat.rs            # HeartbeatTask
-├── api/                        # REST API
-│   ├── routes.rs               # 路由定義
-│   └── handlers.rs             # health, stats, metrics handlers
-├── metrics/                    # Prometheus 指標
-│   └── mod.rs                  # 指標定義與匯出
-├── telemetry/                  # OpenTelemetry
-│   └── mod.rs                  # 追蹤初始化
-└── error/                      # 錯誤處理
-    └── mod.rs                  # AppError 定義
+├── main.rs                            # 進入點、服務啟動
+├── lib.rs                             # 模組匯出
+│
+├── infrastructure/                    # 基礎設施層（橫切關注點）
+│   ├── auth/                          # JWT 驗證、Claims、tenant_scoped_key
+│   ├── config/                        # Settings 載入與驗證
+│   ├── error/                         # AppError、HTTP 錯誤映射
+│   ├── metrics/                       # Prometheus 指標定義
+│   ├── postgres/                      # PostgreSQL 連線池
+│   └── redis/                         # Redis pool、Circuit Breaker、Health
+│
+├── domain/                            # 業務邏輯層
+│   ├── ack/                           # ACK 追蹤（memory/redis/postgres backend）
+│   ├── cluster/                       # 叢集模式（SessionStore、Router）
+│   ├── connection/                    # ConnectionManager 三索引設計
+│   ├── notification/                  # 通知核心
+│   │   ├── dispatcher.rs              # NotificationDispatcher（含 dispatch_for_tenant）
+│   │   ├── types.rs                   # NotificationEvent、Priority、Target
+│   │   └── triggers/
+│   │       ├── http/                  # HTTP REST handlers + batch
+│   │       └── redis.rs               # Redis Pub/Sub 訂閱
+│   ├── queue/                         # 離線訊息佇列（memory/redis/postgres backend）
+│   ├── ratelimit/                     # Token Bucket 限流
+│   ├── realtime/
+│   │   ├── sse/                       # SSE 連線處理
+│   │   └── websocket/                 # WebSocket 連線處理、訊息路由
+│   ├── template/                      # 通知模板（CRUD + 變數替換）
+│   └── tenant/                        # 多租戶支援（TenantManager、Context）
+│
+├── api/                               # REST API handlers
+│   ├── cluster.rs                     # /api/v1/cluster/*
+│   ├── connection.rs                  # /api/v1/channels/*、/users/*/subscriptions
+│   ├── health.rs                      # /health、/stats
+│   ├── metrics.rs                     # /metrics（Prometheus）
+│   ├── template.rs                    # /api/v1/templates/*
+│   └── tenant.rs                      # /api/v1/tenants/*
+│
+├── server/                            # 伺服器組裝
+│   ├── app.rs                         # Axum 路由與 CORS
+│   ├── middleware.rs                  # API Key auth、X-Tenant-ID、限流
+│   └── state.rs                       # AppState 共享狀態
+│
+├── shutdown/                          # 優雅關閉協調
+├── tasks/                             # 背景任務（heartbeat）
+└── telemetry/                         # OpenTelemetry 追蹤初始化
 ```
 
 ## 文件
