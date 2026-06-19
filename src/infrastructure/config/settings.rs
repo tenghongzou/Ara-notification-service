@@ -292,6 +292,10 @@ pub struct ServerConfig {
 
 #[derive(Clone, Deserialize)]
 pub struct JwtConfig {
+    #[serde(default)]
+    pub algorithm: Option<String>,
+    #[serde(default)]
+    pub publickey: Option<String>,
     pub secret: String,
     pub issuer: Option<String>,
     pub audience: Option<String>,

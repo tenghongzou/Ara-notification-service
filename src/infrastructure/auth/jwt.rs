@@ -1,4 +1,5 @@
-use jsonwebtoken::{decode, DecodingKey, Validation};
+use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
+use std::fs;
 
 use crate::config::JwtConfig;
 use crate::error::AppError;
@@ -12,9 +13,32 @@ pub struct JwtValidator {
 
 impl JwtValidator {
     pub fn new(config: &JwtConfig) -> Self {
-        let decoding_key = DecodingKey::from_secret(config.secret.as_bytes());
+        let algorithm = config
+            .algorithm
+            .as_deref()
+            .unwrap_or("HS256");
 
-        let mut validation = Validation::default();
+        let (decoding_key, alg) = match algorithm {
+            "RS256" => {
+                let pem_path = config
+                    .publickey
+                    .as_deref()
+                    .expect("publickey is required for RS256");
+                let pem = fs::read(pem_path)
+                    .unwrap_or_else(|e| panic!("Failed to read public key {}: {}", pem_path, e));
+                (
+                    DecodingKey::from_rsa_pem(&pem)
+                        .expect("Invalid RSA public key"),
+                    Algorithm::RS256,
+                )
+            }
+            _ => (
+                DecodingKey::from_secret(config.secret.as_bytes()),
+                Algorithm::HS256,
+            ),
+        };
+
+        let mut validation = Validation::new(alg);
 
         if let Some(ref issuer) = config.issuer {
             validation.set_issuer(&[issuer]);
@@ -48,6 +72,8 @@ mod tests {
             secret: "test-secret-key-for-testing".to_string(),
             issuer: None,
             audience: None,
+            algorithm: None,
+            publickey: None,
         }
     }
 
